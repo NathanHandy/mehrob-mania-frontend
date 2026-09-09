@@ -6,6 +6,87 @@ import {
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts';
 
+// ============================= LIVE DATA CONFIG =============================
+const API_BASE_URL = 'https://mehrob-mania-backend-1.onrender.com';
+
+// Maps Yahoo's team_id (1-12) to our internal nickname system, so live
+// data lines up with the bios/history already keyed by these nicks.
+const YAHOO_TEAM_ID_TO_NICK = {
+  1: 'NJ', 2: 'RB', 3: 'Okarp', 4: 'Glo pup', 5: 'Zai', 6: 'Bronnie',
+  7: 'Bodge', 8: 'Twizzy', 9: 'Rooby', 10: 'Gill', 11: 'Mr', 12: 'Skeo',
+};
+const YAHOO_DIVISION_ID_TO_NAME = { 1: 'Bad Little Boys', 2: 'Mid Little Boys', 3: 'Good Little Boys' };
+
+// Yahoo's team objects are arrays mixing real data objects with empty-array
+// placeholders — this merges all the real objects into one flat lookup.
+function flattenYahooMeta(arr) {
+  const result = {};
+  arr.forEach((item) => {
+    if (!Array.isArray(item)) Object.assign(result, item);
+  });
+  return result;
+}
+
+function parseYahooStandings(json) {
+  const teamsObj = json?.fantasy_content?.league?.[1]?.standings?.[0]?.teams;
+  if (!teamsObj) return null;
+
+  const byDivision = { 'Bad Little Boys': [], 'Mid Little Boys': [], 'Good Little Boys': [] };
+  Object.keys(teamsObj).forEach((key) => {
+    if (key === 'count') return;
+    const teamArr = teamsObj[key].team;
+    const meta = flattenYahooMeta(teamArr[0]);
+    const standings = teamArr[2]?.team_standings || {};
+    const outcomes = standings.outcome_totals || {};
+    const divOutcomes = standings.divisional_outcome_totals || {};
+
+    const nick = YAHOO_TEAM_ID_TO_NICK[meta.team_id];
+    const divName = YAHOO_DIVISION_ID_TO_NAME[meta.division_id];
+    if (!nick || !divName) return;
+
+    byDivision[divName].push({
+      nick,
+      team: meta.name,
+      owner: meta.managers?.[0]?.manager?.nickname || nick,
+      w: Number(outcomes.wins) || 0,
+      l: Number(outcomes.losses) || 0,
+      pf: Number(standings.points_for) || 0,
+      pa: Number(standings.points_against) || 0,
+      divW: Number(divOutcomes.wins) || 0,
+      divL: Number(divOutcomes.losses) || 0,
+      h2h: 0,
+      faab: Number(meta.faab_balance) || 0,
+      streak: '—',
+      draftGrade: meta.draft_grade || null,
+    });
+  });
+  return byDivision;
+}
+
+function useLiveStandings() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/standings`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Backend returned an error');
+        return res.json();
+      })
+      .then((json) => {
+        const parsed = parseYahooStandings(json);
+        if (!parsed) throw new Error('Unexpected response shape');
+        setData(parsed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return { data, loading, error };
+}
+
+
 // ============================= THEME =============================
 const THEMES = {
   dark: {
@@ -556,11 +637,15 @@ function StandingsTable({ title, teams, accentBar, c, rankMap }) {
   );
 }
 
-function buildOverallRankMap(divOrder, restOrder) {
+function buildOverallRankMap(divOrder, restOrder, teamsByDiv) {
   // Three divisions now (Bad/Mid/Good Little Boys). Only the 2 BEST
   // division winners get byes (seeds 1-2) — the 3rd division winner
   // gets no special treatment and is seeded purely on merit alongside
   // everyone else for seeds 3-12.
+  const bad = teamsByDiv ? teamsByDiv['Bad Little Boys'] : BAD_LITTLE_BOYS;
+  const mid = teamsByDiv ? teamsByDiv['Mid Little Boys'] : MID_LITTLE_BOYS;
+  const good = teamsByDiv ? teamsByDiv['Good Little Boys'] : GOOD_LITTLE_BOYS;
+
   const compareByRest = (a, b) => {
     const winPctDiff = (b.w / (b.w + b.l || 1)) - (a.w / (a.w + a.l || 1));
     if (winPctDiff !== 0) return winPctDiff;
@@ -571,16 +656,15 @@ function buildOverallRankMap(divOrder, restOrder) {
     return 0;
   };
 
-  const badWinner = sortTeams(BAD_LITTLE_BOYS, divOrder)[0];
-  const midWinner = sortTeams(MID_LITTLE_BOYS, divOrder)[0];
-  const goodWinner = sortTeams(GOOD_LITTLE_BOYS, divOrder)[0];
+  const badWinner = sortTeams(bad, divOrder)[0];
+  const midWinner = sortTeams(mid, divOrder)[0];
+  const goodWinner = sortTeams(good, divOrder)[0];
 
   const allDivWinners = [badWinner, midWinner, goodWinner].sort(compareByRest);
   const byeWinners = allDivWinners.slice(0, 2); // seeds 1-2
-  const thirdWinner = allDivWinners[2]; // no bye, joins general pool
 
   const rest = sortTeams(
-    [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS].filter(
+    [...bad, ...mid, ...good].filter(
       (t) => !byeWinners.some((w) => w.nick === t.nick)
     ),
     restOrder
@@ -593,18 +677,26 @@ function buildOverallRankMap(divOrder, restOrder) {
 }
 
 function StandingsPage({ c, accent, divOrder, setDivOrder, restOrder, setRestOrder }) {
-  const rankMap = buildOverallRankMap(divOrder, restOrder);
+  const { data: liveData, loading, error } = useLiveStandings();
+  const rankMap = buildOverallRankMap(divOrder, restOrder, liveData);
+
+  const bad = liveData ? liveData['Bad Little Boys'] : BAD_LITTLE_BOYS;
+  const mid = liveData ? liveData['Mid Little Boys'] : MID_LITTLE_BOYS;
+  const good = liveData ? liveData['Good Little Boys'] : GOOD_LITTLE_BOYS;
+
   return (
     <div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        Live from Yahoo. Seed reflects overall standing across all 12 teams: the 2 best division winners hold seeds 1-2 (byes), everyone else &mdash; including the 3rd division winner &mdash; is seeded 3-12 by record regardless of division. Tiebreakers only apply when W-L records are actually tied.
+        {loading && 'Loading live standings from Yahoo\u2026'}
+        {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
+        {!loading && !error && 'Live from Yahoo.'} Seed reflects overall standing across all 12 teams: the 2 best division winners hold seeds 1-2 (byes), everyone else &mdash; including the 3rd division winner &mdash; is seeded 3-12 by record regardless of division. Tiebreakers only apply when W-L records are actually tied.
       </div>
       <TiebreakerPicker order={divOrder} setOrder={setDivOrder} c={c} label="Division Winner Tiebreakers" />
       <TiebreakerPicker order={restOrder} setOrder={setRestOrder} c={c} label="Rest of Seeding Tiebreakers" />
       <div className="mb-2" />
-      <StandingsTable title="Bad Little Boys" teams={BAD_LITTLE_BOYS} accentBar={accent} c={c} rankMap={rankMap} />
-      <StandingsTable title="Mid Little Boys" teams={MID_LITTLE_BOYS} accentBar={c.win} c={c} rankMap={rankMap} />
-      <StandingsTable title="Good Little Boys" teams={GOOD_LITTLE_BOYS} accentBar={c.rival} c={c} rankMap={rankMap} />
+      <StandingsTable title="Bad Little Boys" teams={bad} accentBar={accent} c={c} rankMap={rankMap} />
+      <StandingsTable title="Mid Little Boys" teams={mid} accentBar={c.win} c={c} rankMap={rankMap} />
+      <StandingsTable title="Good Little Boys" teams={good} accentBar={c.rival} c={c} rankMap={rankMap} />
     </div>
   );
 }
