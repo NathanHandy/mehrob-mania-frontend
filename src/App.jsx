@@ -597,10 +597,10 @@ const RECORD_BOOK = {
 };
 
 const CHAMPIONS = [
-  { year: 2025, champion: 'NJ', runnerUp: 'Zai', third: 'Skeo', lastPlace: 'Bodge', toiletBowlWinner: 'Twizzy', toiletBowlLoser: 'Mr', mostPF: 'NJ', mostPA: 'Mr', badDivWinner: 'Skeo', goodDivWinner: 'NJ' },
-  { year: 2024, champion: 'Okarp', runnerUp: 'NJ', third: 'Zai', lastPlace: 'Mr', toiletBowlWinner: 'RB', toiletBowlLoser: 'Bronnie', mostPF: 'Okarp', mostPA: 'Bronnie', badDivWinner: 'Okarp', goodDivWinner: 'NJ' },
-  { year: 2023, champion: 'BeezyBallGame', runnerUp: "Nathan's Nice Team", third: "Gojo's Getback", lastPlace: 'Ready For Next Season', toiletBowlWinner: 'Republic of Gill', toiletBowlLoser: 'Ready For Next Season', mostPF: "Gojo's Getback", mostPA: 'Ready For Next Season', badDivWinner: "Gojo's Getback", goodDivWinner: 'BeezyBallGame' },
-  { year: 2022, champion: 'Bodge', runnerUp: 'Skeo', third: 'RB', lastPlace: 'Zai', toiletBowlWinner: 'Gill', toiletBowlLoser: 'Okarp', mostPF: 'Bodge', mostPA: 'Okarp', badDivWinner: 'Skeo', goodDivWinner: 'Bodge' },
+  { year: 2025, champion: 'Skeo', runnerUp: 'NJ', third: 'Rooby', lastPlace: 'Twizzy', toiletBowlWinner: 'Okarp', toiletBowlLoser: 'Twizzy', mostPF: 'Glo pup', mostPA: 'Glo pup', badDivWinner: 'Skeo', goodDivWinner: 'NJ' },
+  { year: 2024, champion: 'Gill', runnerUp: 'Okarp', third: 'Bodge', lastPlace: 'Glo pup', toiletBowlWinner: 'RB', toiletBowlLoser: 'Glo pup', mostPF: 'Okarp', mostPA: 'Zai', badDivWinner: 'Bodge', goodDivWinner: 'Gill' },
+  { year: 2023, champion: 'RB', runnerUp: 'NJ', third: 'Zai', lastPlace: 'Rooby', toiletBowlWinner: 'Bodge', toiletBowlLoser: 'Rooby', mostPF: 'Zai', mostPA: 'Rooby', badDivWinner: 'Zai', goodDivWinner: 'RB' },
+  { year: 2022, champion: 'Bodge', runnerUp: 'Skeo', third: 'RB', lastPlace: 'Zai', toiletBowlWinner: 'Gill', toiletBowlLoser: 'Okarp', mostPF: 'Bodge', mostPA: 'Okarp', badDivWinner: 'Skeo', goodDivWinner: 'Bodge' }, // unverified — played under a separate, unlinked Yahoo league
 ];
 
 // Generates a plausible full 12-team season standings table for a given
