@@ -86,6 +86,53 @@ function useLiveStandings() {
   return { data, loading, error };
 }
 
+function parseYahooDraft(json) {
+  const resultsObj = json?.fantasy_content?.league?.[1]?.draft_results;
+  const playerNames = json?.playerNames;
+  if (!resultsObj || !playerNames) return null;
+
+  const byNick = {};
+  Object.keys(resultsObj).forEach((key) => {
+    if (key === 'count') return;
+    const pick = resultsObj[key].draft_result;
+    const teamIdMatch = pick.team_key.match(/\.t\.(\d+)$/);
+    const teamId = teamIdMatch ? Number(teamIdMatch[1]) : null;
+    const nick = YAHOO_TEAM_ID_TO_NICK[teamId];
+    if (!nick) return;
+    if (!byNick[nick]) byNick[nick] = [];
+    byNick[nick].push({
+      round: pick.round,
+      pickNo: pick.pick,
+      player: playerNames[pick.player_key] || 'Unknown Player',
+    });
+  });
+  Object.values(byNick).forEach((picks) => picks.sort((a, b) => a.round - b.round));
+  return byNick;
+}
+
+function useLiveDraft() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/draft`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Backend returned an error');
+        return res.json();
+      })
+      .then((json) => {
+        const parsed = parseYahooDraft(json);
+        if (!parsed) throw new Error('Unexpected response shape');
+        setData(parsed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return { data, loading, error };
+}
+
 
 // ============================= THEME =============================
 const THEMES = {
@@ -1445,14 +1492,26 @@ function DraftPage({ c, accent }) {
   const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
   const [selected, setSelected] = useState(allTeams[0].nick);
   const team = allTeams.find((t) => t.nick === selected);
-  const picks = generateDraftClass(selected);
-  const grades = draftGrades(selected);
+
+  const { data: liveDraft, loading: draftLoading, error: draftError } = useLiveDraft();
+  const { data: liveStandings } = useLiveStandings();
+
+  const livePicks = liveDraft ? liveDraft[selected] : null;
+  const picks = livePicks || generateDraftClass(selected);
+
+  const liveGrade = liveStandings
+    ? [...(liveStandings['Bad Little Boys'] || []), ...(liveStandings['Mid Little Boys'] || []), ...(liveStandings['Good Little Boys'] || [])]
+        .find((t) => t.nick === selected)?.draftGrade
+    : null;
+  const mockGrades = draftGrades(selected);
 
   return (
     <div>
       <SectionHeader title="Draft" c={c} accent={accent} />
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        Sample draft class shown &mdash; real results populate after the July 25th draft. Post-season grade updates weekly as players over/underperform.
+        {draftLoading && 'Loading real draft results from Yahoo\u2026'}
+        {!draftLoading && draftError && `Couldn't load live draft data (${draftError}) \u2014 showing sample data instead.`}
+        {!draftLoading && !draftError && 'Real 2026 draft results from Yahoo.'}
       </div>
 
       <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full text-sm rounded-md px-3 py-2 border font-medium mb-4" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
@@ -1468,7 +1527,7 @@ function DraftPage({ c, accent }) {
                 <span className="text-[10px] w-9 text-center flex-shrink-0" style={{ fontFamily: MONO, color: c.subtextFaint }}>R{p.round}</span>
                 <span className="text-sm font-medium" style={{ color: c.text }}>{p.player}</span>
               </div>
-              <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" style={{ color: c.subtextFaint, backgroundColor: c.panelAlt }}>{p.position}</span>
+              {p.position && <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" style={{ color: c.subtextFaint, backgroundColor: c.panelAlt }}>{p.position}</span>}
             </div>
           </Panel>
         ))}
@@ -1477,14 +1536,14 @@ function DraftPage({ c, accent }) {
       <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Draft Analysis</div>
       <div className="grid grid-cols-2 gap-3">
         <Panel c={c} style={{ padding: 14 }}>
-          <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>Pre-Season Grade</div>
-          <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{grades.pre}</div>
-          <p className="text-xs" style={{ color: c.subtext }}>Reached slightly early on the RB2 spot but landed strong value at WR in the middle rounds.</p>
+          <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>{liveGrade ? 'Yahoo Draft Grade' : 'Pre-Season Grade'}</div>
+          <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade || mockGrades.pre}</div>
+          <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? "Yahoo's own grade for this draft class, based on pick value and roster construction." : 'Reached slightly early on the RB2 spot but landed strong value at WR in the middle rounds.'}</p>
         </Panel>
         <Panel c={c} style={{ padding: 14 }}>
           <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>Post-Season Grade</div>
-          <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{grades.post}</div>
-          <p className="text-xs" style={{ color: c.subtext }}>Updates weekly. Early-round picks are outperforming their draft slot so far this season.</p>
+          <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade ? '\u2014' : mockGrades.post}</div>
+          <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? 'Updates once the season is underway and real performance data is in.' : 'Updates weekly. Early-round picks are outperforming their draft slot so far this season.'}</p>
         </Panel>
       </div>
     </div>
