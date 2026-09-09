@@ -271,23 +271,20 @@ function useLiveSchedule(week) {
 }
 
 // --- Playoff odds via Monte Carlo simulation ---
-// Blends each team's real record with their real Yahoo draft grade (as a
-// pre-season strength proxy before real games exist, fading out as the
-// season goes), then simulates the rest of the real remaining schedule
-// thousands of times using those strength ratings, tallying how often
-// each team actually finishes in the top 6 under our real seeding rules.
-const DRAFT_GRADE_SCORE = { 'A+': 12, A: 11, 'A-': 10, 'B+': 9, B: 8, 'B-': 7, 'C+': 6, C: 5, 'C-': 4, 'D+': 3, D: 2, 'D-': 1, F: 0 };
-
+// Based purely on real record and the real remaining schedule \u2014 no
+// projected/pre-season strength assumptions. Before any games are played
+// every team is a true coin flip; the simulation still produces real
+// variance in each team's odds because it runs the actual remaining
+// schedule and real seeding/tiebreaker rules thousands of times, and
+// those aren't symmetric for every team (who you play, when, and how
+// tiebreakers fall all matter independent of team strength).
 function computePlayoffOdds(liveData, remainingWeeksMatchups, divOrder, restOrder, iterations = 1500) {
   const allTeams = [...liveData['Bad Little Boys'], ...liveData['Mid Little Boys'], ...liveData['Good Little Boys']];
 
   const power = {};
   allTeams.forEach((t) => {
     const gp = t.w + t.l;
-    const record = gp > 0 ? t.w / gp : 0.5;
-    const draftScore = (DRAFT_GRADE_SCORE[t.draftGrade] ?? 6) / 12;
-    const weight = Math.min(gp / 14, 1); // fades from draft-grade-based to pure record as the season goes
-    power[t.nick] = weight * record + (1 - weight) * draftScore;
+    power[t.nick] = gp > 0 ? t.w / gp : 0.5; // real record only; 0.5 (true coin flip) until real games exist
   });
 
   const divNameOf = {};
@@ -306,7 +303,7 @@ function computePlayoffOdds(liveData, remainingWeeksMatchups, divOrder, restOrde
       week.forEach(([a, b]) => {
         if (!sim[a] || !sim[b]) return;
         const pa = power[a] ?? 0.5, pb = power[b] ?? 0.5;
-        const prob = 1 / (1 + Math.pow(10, -(pa - pb) * 4)); // logistic, gentler than a true Elo curve to reflect fantasy's real week-to-week variance
+        const prob = 1 / (1 + Math.pow(10, -(pa - pb) * 0.6)); // calibrated so a big real record gap (e.g. 0.8 vs 0.3 win%) lands around a 65-68% favorite, not a near-lock \u2014 fantasy football has real week-to-week variance
         const aWins = Math.random() < prob;
         if (aWins) { sim[a].w++; sim[b].l++; } else { sim[b].w++; sim[a].l++; }
         if (divNameOf[a] === divNameOf[b]) {
@@ -1327,10 +1324,10 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
         )}
       </div>
 
-      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(simulated from real record, draft grade &amp; remaining schedule)</span></div>
+      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(simulated from real record, tiebreakers &amp; remaining schedule)</span></div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
         {oddsLoading && 'Running the simulation against the real remaining schedule\u2026'}
-        {!oddsLoading && oddsResult && 'Recalculated weekly \u2014 blends current record with real draft grade early on, and simulates the rest of the real schedule thousands of times to estimate each team\u2019s odds.'}
+        {!oddsLoading && oddsResult && 'Recalculated weekly \u2014 based purely on real record, real tiebreakers, and the real remaining schedule. Simulates the rest of the season thousands of times to estimate each team\u2019s odds; pre-season, that means everyone starts as a true coin flip, with variance coming only from schedule structure and tiebreaker mechanics.'}
       </div>
       <div className="space-y-2">
         {allTeams
