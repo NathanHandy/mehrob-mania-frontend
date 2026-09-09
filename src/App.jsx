@@ -133,6 +133,76 @@ function useLiveDraft() {
   return { data, loading, error };
 }
 
+function parseYahooTransactions(json) {
+  const txObj = json?.fantasy_content?.league?.[1]?.transactions;
+  if (!txObj) return null;
+
+  const moves = [];
+  Object.keys(txObj).forEach((key) => {
+    if (key === 'count') return;
+    const txArr = txObj[key].transaction;
+    const meta = txArr[0];
+    if (meta.type === 'commish') return; // settings changes, no players involved
+
+    const playersObj = txArr[1]?.players || {};
+    const playerEntries = [];
+    Object.keys(playersObj).forEach((pk) => {
+      if (pk === 'count') return;
+      const parr = playersObj[pk].player;
+      const pMeta = flattenYahooMeta(parr[0]);
+      const txDataRaw = parr[1]?.transaction_data;
+      const txData = Array.isArray(txDataRaw) ? txDataRaw[0] : txDataRaw;
+      if (!txData) return;
+      playerEntries.push({
+        name: pMeta.name?.full,
+        txType: txData.type,
+        destTeam: txData.destination_team_name,
+        sourceTeam: txData.source_team_name,
+      });
+    });
+
+    const date = new Date(Number(meta.timestamp) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+    if (meta.type === 'trade') {
+      const teamA = meta.trader_team_name;
+      const teamB = meta.tradee_team_name;
+      const teamAGets = playerEntries.filter((p) => p.destTeam === teamA).map((p) => p.name);
+      const teamBGets = playerEntries.filter((p) => p.destTeam === teamB).map((p) => p.name);
+      moves.push({ date, year: 2026, type: 'Trade', teamA, teamAGets, teamB, teamBGets });
+    } else {
+      const addedEntry = playerEntries.find((p) => p.txType === 'add');
+      const droppedEntry = playerEntries.find((p) => p.txType === 'drop');
+      const team = addedEntry?.destTeam || droppedEntry?.sourceTeam;
+      if (!team) return;
+      moves.push({ date, year: 2026, type: 'Add/Drop', team, added: addedEntry?.name || null, dropped: droppedEntry?.name || null });
+    }
+  });
+  return moves;
+}
+
+function useLiveTransactions() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/transactions`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Backend returned an error');
+        return res.json();
+      })
+      .then((json) => {
+        const parsed = parseYahooTransactions(json);
+        if (!parsed) throw new Error('Unexpected response shape');
+        setData(parsed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return { data, loading, error };
+}
+
 
 // ============================= THEME =============================
 const THEMES = {
@@ -1815,7 +1885,7 @@ function MoveCard({ m, c, accent }) {
       </div>
       <div className="text-sm font-medium" style={{ color: c.text }}>{m.team}</div>
       <div className="text-xs" style={{ color: c.subtext }}>
-        Added {m.added}{m.dropped && <> &mdash; dropped {m.dropped}</>}
+        {m.added && <>Added {m.added}</>}{m.added && m.dropped && <> &mdash; </>}{m.dropped && <>Dropped {m.dropped}</>}
       </div>
     </Panel>
   );
@@ -1825,17 +1895,20 @@ function MovesPage({ c, accent }) {
   const [teamFilter, setTeamFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
   const [yearFilter, setYearFilter] = useState('all');
+  const { data: liveMoves, loading, error } = useLiveTransactions();
+
+  const ALL_MOVES = liveMoves ? [...liveMoves, ...MOVES] : MOVES;
 
   const allTeamsInvolved = new Set();
-  MOVES.forEach((m) => {
+  ALL_MOVES.forEach((m) => {
     if (m.type === 'Trade') { allTeamsInvolved.add(m.teamA); allTeamsInvolved.add(m.teamB); }
     else allTeamsInvolved.add(m.team);
   });
   const teams = ['all', ...allTeamsInvolved];
-  const types = ['all', ...new Set(MOVES.map((m) => m.type))];
-  const years = ['all', ...new Set(MOVES.map((m) => m.year))].sort((a, b) => (a === 'all' ? -1 : b === 'all' ? 1 : b - a));
+  const types = ['all', ...new Set(ALL_MOVES.map((m) => m.type))];
+  const years = ['all', ...new Set(ALL_MOVES.map((m) => m.year))].sort((a, b) => (a === 'all' ? -1 : b === 'all' ? 1 : b - a));
 
-  const filtered = MOVES.filter((m) => {
+  const filtered = ALL_MOVES.filter((m) => {
     const teamMatch = teamFilter === 'all' || (m.type === 'Trade' ? (m.teamA === teamFilter || m.teamB === teamFilter) : m.team === teamFilter);
     const typeMatch = typeFilter === 'all' || m.type === typeFilter;
     const yearMatch = yearFilter === 'all' || m.year === Number(yearFilter);
@@ -1845,6 +1918,11 @@ function MovesPage({ c, accent }) {
   return (
     <div>
       <SectionHeader title="Moves" c={c} accent={accent} />
+      <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
+        {loading && 'Loading real 2026 transactions from Yahoo\u2026'}
+        {!loading && error && `Couldn't load live 2026 moves (${error}) \u2014 showing sample/historical data only.`}
+        {!loading && !error && '2026 moves are real from Yahoo; earlier years are sample data.'}
+      </div>
       <div className="flex gap-2 mb-4">
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} className="flex-1 text-xs rounded-md px-2 py-2 border" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
           {teams.map((t) => <option key={t} value={t}>{t === 'all' ? 'All Teams' : t}</option>)}
