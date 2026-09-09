@@ -1150,8 +1150,11 @@ const PLAYOFF_ODDS = {
 
 function PlayoffsPage({ c, accent, divOrder, restOrder }) {
   const [view, setView] = useState('playoff');
-  const rankMap = buildOverallRankMap(divOrder, restOrder);
-  const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
+  const { data: liveData, loading, error } = useLiveStandings();
+  const rankMap = buildOverallRankMap(divOrder, restOrder, liveData);
+  const allTeams = liveData
+    ? [...liveData['Bad Little Boys'], ...liveData['Mid Little Boys'], ...liveData['Good Little Boys']]
+    : [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
   const bySeed = (seed) => allTeams.find((t) => rankMap[t.nick] === seed);
 
   const seeds = {};
@@ -1161,7 +1164,9 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
     <div>
       <SectionHeader title="Playoff Picture" c={c} accent={accent} />
       <div className="mb-4 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        Built live from current standings &mdash; not official until playoffs actually begin (weeks 15&ndash;17). The bracket reseeds after every round: the highest remaining seed always plays the lowest remaining seed, comparing both winners against each other &mdash; so the #1 seed could face the winner of either Round 1 match, not just the one drawn next to it. Sample data shown.
+        {loading && 'Loading live standings from Yahoo\u2026'}
+        {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
+        {!loading && !error && 'Built live from current Yahoo standings.'} Not official until playoffs actually begin (weeks 15&ndash;17). The bracket reseeds after every round: the highest remaining seed always plays the lowest remaining seed, comparing both winners against each other &mdash; so the #1 seed could face the winner of either Round 1 match, not just the one drawn next to it.
       </div>
 
       <div className="flex gap-1 mb-4 rounded-lg border p-1" style={{ borderColor: c.border, backgroundColor: c.panel }}>
@@ -1194,7 +1199,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
         )}
       </div>
 
-      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds</div>
+      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(sample &mdash; Yahoo doesn't provide odds/SOS data)</span></div>
       <div className="space-y-2">
         {Object.entries(PLAYOFF_ODDS)
           .sort((a, b) => rankMap[a[0]] - rankMap[b[0]])
