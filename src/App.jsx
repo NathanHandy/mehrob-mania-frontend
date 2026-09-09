@@ -203,6 +203,71 @@ function useLiveTransactions() {
   return { data, loading, error };
 }
 
+function parseYahooSchedule(json, week) {
+  const matchupsObj = json?.fantasy_content?.league?.[1]?.scoreboard?.[0]?.matchups;
+  if (!matchupsObj) return null;
+
+  const games = [];
+  Object.keys(matchupsObj).forEach((key) => {
+    if (key === 'count') return;
+    const teamsObj = matchupsObj[key].matchup[0]?.teams;
+    if (!teamsObj) return;
+    const t0 = teamsObj['0']?.team;
+    const t1 = teamsObj['1']?.team;
+    if (!t0 || !t1) return;
+
+    const meta0 = flattenYahooMeta(t0[0]);
+    const meta1 = flattenYahooMeta(t1[0]);
+    const stats0 = t0[1] || {};
+    const stats1 = t1[1] || {};
+
+    const nick0 = YAHOO_TEAM_ID_TO_NICK[Number(meta0.team_id)];
+    const nick1 = YAHOO_TEAM_ID_TO_NICK[Number(meta1.team_id)];
+    if (!nick0 || !nick1) return;
+
+    const played0 = Number(stats0.team_points?.total) > 0;
+    const played1 = Number(stats1.team_points?.total) > 0;
+    const anyPlayed = played0 || played1;
+
+    games.push({
+      home: nick0,
+      away: nick1,
+      hs: anyPlayed ? Number(stats0.team_points?.total) || 0 : null,
+      as: anyPlayed ? Number(stats1.team_points?.total) || 0 : null,
+      homeProj: Number(stats0.team_projected_points?.total) || 0,
+      awayProj: Number(stats1.team_projected_points?.total) || 0,
+      div: meta0.division_id === meta1.division_id,
+      rival: Number(week) === 3 || Number(week) === 4, // whoever plays each other in weeks 3-4 are the rivalry matchups
+    });
+  });
+  return games;
+}
+
+function useLiveSchedule(week) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    setError(null);
+    fetch(`${API_BASE_URL}/api/schedule?week=${week}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Backend returned an error');
+        return res.json();
+      })
+      .then((json) => {
+        const parsed = parseYahooSchedule(json, week);
+        if (!parsed) throw new Error('Unexpected response shape');
+        setData(parsed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [week]);
+
+  return { data, loading, error };
+}
+
 
 // ============================= THEME =============================
 const THEMES = {
@@ -820,17 +885,33 @@ function StandingsPage({ c, accent, divOrder, setDivOrder, restOrder, setRestOrd
 
 // ============================= SCHEDULE =============================
 function SchedulePage({ c, accent }) {
-  const weekNums = Object.keys(SCHEDULE_WEEKS).map(Number);
   const [week, setWeek] = useState(1);
-  const matchups = SCHEDULE_WEEKS[week];
-  const isLive = matchups.some((m) => m.hs === null);
+  const { data: liveMatchups, loading, error } = useLiveSchedule(week);
+  const weekNums = liveMatchups || !error ? Array.from({ length: 17 }, (_, i) => i + 1) : Object.keys(SCHEDULE_WEEKS).map(Number);
+  const matchups = liveMatchups || SCHEDULE_WEEKS[week] || SCHEDULE_WEEKS[1];
 
-  const awards = [
-    { label: 'High Score', team: 'NJ', val: '145.9' },
-    { label: 'Low Score', team: 'Twizzy', val: '88.1' },
-    { label: 'Closest Game', team: 'Glo pup vs Gill', val: '3.4 pt margin' },
-    { label: 'Biggest Blowout', team: 'NJ vs Zai', val: '47.6 pt margin' },
-  ];
+  const anyRealScores = matchups.some((m) => m.hs !== null);
+  const awards = anyRealScores
+    ? (() => {
+        const scored = matchups.flatMap((m) => [{ team: m.home, val: m.hs }, { team: m.away, val: m.as }]);
+        const high = scored.reduce((a, b) => (b.val > a.val ? b : a));
+        const low = scored.reduce((a, b) => (b.val < a.val ? b : a));
+        const margins = matchups.map((m) => ({ label: `${m.home} vs ${m.away}`, margin: Math.abs(m.hs - m.as) }));
+        const closest = margins.reduce((a, b) => (b.margin < a.margin ? b : a));
+        const blowout = margins.reduce((a, b) => (b.margin > a.margin ? b : a));
+        return [
+          { label: 'High Score', team: high.team, val: high.val.toFixed(1) },
+          { label: 'Low Score', team: low.team, val: low.val.toFixed(1) },
+          { label: 'Closest Game', team: closest.label, val: `${closest.margin.toFixed(1)} pt margin` },
+          { label: 'Biggest Blowout', team: blowout.label, val: `${blowout.margin.toFixed(1)} pt margin` },
+        ];
+      })()
+    : [
+        { label: 'High Score', team: 'NJ', val: '145.9' },
+        { label: 'Low Score', team: 'Twizzy', val: '88.1' },
+        { label: 'Closest Game', team: 'Glo pup vs Gill', val: '3.4 pt margin' },
+        { label: 'Biggest Blowout', team: 'NJ vs Zai', val: '47.6 pt margin' },
+      ];
 
   return (
     <div>
@@ -841,17 +922,21 @@ function SchedulePage({ c, accent }) {
         </select>
       </div>
 
-      {week === 1 && (
-        <div className="grid grid-cols-4 gap-2 mb-5">
-          {awards.map((a) => (
-            <Panel key={a.label} c={c} style={{ padding: 10 }}>
-              <div className="text-[9px] uppercase tracking-wider mb-0.5" style={{ color: c.subtextFaint }}>{a.label}</div>
-              <div className="text-xs font-semibold leading-tight" style={{ color: c.text }}>{a.team}</div>
-              <div className="text-[10px]" style={{ fontFamily: MONO, color: c.subtextFaint }}>{a.val}</div>
-            </Panel>
-          ))}
-        </div>
-      )}
+      <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
+        {loading && 'Loading live matchups from Yahoo\u2026'}
+        {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
+        {!loading && !error && 'Live from Yahoo.'}
+      </div>
+
+      <div className="grid grid-cols-4 gap-2 mb-5">
+        {awards.map((a) => (
+          <Panel key={a.label} c={c} style={{ padding: 10 }}>
+            <div className="text-[9px] uppercase tracking-wider mb-0.5" style={{ color: c.subtextFaint }}>{a.label}</div>
+            <div className="text-xs font-semibold leading-tight" style={{ color: c.text }}>{a.team}</div>
+            <div className="text-[10px]" style={{ fontFamily: MONO, color: c.subtextFaint }}>{a.val}</div>
+          </Panel>
+        ))}
+      </div>
 
       <div className="space-y-3">
         {matchups.map((m, i) => {
@@ -873,14 +958,14 @@ function SchedulePage({ c, accent }) {
                 <div className="flex-1">
                   <div className="font-semibold" style={{ color: homeWin || showProjected ? c.text : c.subtext }}>{m.home}</div>
                   {showProjected
-                    ? <span className="text-xs" style={{ color: c.subtextFaint }}>Proj. {(80 + Math.random() * 50).toFixed(1)}</span>
+                    ? <span className="text-xs" style={{ color: c.subtextFaint }}>Proj. {(m.homeProj || 0).toFixed(1)}</span>
                     : <Digits value={m.hs} c={c} />}
                 </div>
                 <div className="text-xs px-3" style={{ fontFamily: MONO, color: c.subtextFaint }}>VS</div>
                 <div className="flex-1 text-right">
                   <div className="font-semibold" style={{ color: !homeWin || showProjected ? c.text : c.subtext }}>{m.away}</div>
                   {showProjected
-                    ? <span className="text-xs" style={{ color: c.subtextFaint }}>Proj. {(80 + Math.random() * 50).toFixed(1)}</span>
+                    ? <span className="text-xs" style={{ color: c.subtextFaint }}>Proj. {(m.awayProj || 0).toFixed(1)}</span>
                     : <Digits value={m.as} c={c} />}
                 </div>
               </div>
