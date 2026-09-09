@@ -67,6 +67,7 @@ function useLiveStandings() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [currentWeek, setCurrentWeek] = useState(null);
 
   useEffect(() => {
     fetch(`${API_BASE_URL}/api/standings`)
@@ -78,12 +79,13 @@ function useLiveStandings() {
         const parsed = parseYahooStandings(json);
         if (!parsed) throw new Error('Unexpected response shape');
         setData(parsed);
+        setCurrentWeek(json?.fantasy_content?.league?.[0]?.current_week || 1);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, []);
 
-  return { data, loading, error };
+  return { data, loading, error, currentWeek };
 }
 
 function parseYahooDraft(json) {
@@ -266,6 +268,131 @@ function useLiveSchedule(week) {
   }, [week]);
 
   return { data, loading, error };
+}
+
+// --- Playoff odds via Monte Carlo simulation ---
+// Blends each team's real record with their real Yahoo draft grade (as a
+// pre-season strength proxy before real games exist, fading out as the
+// season goes), then simulates the rest of the real remaining schedule
+// thousands of times using those strength ratings, tallying how often
+// each team actually finishes in the top 6 under our real seeding rules.
+const DRAFT_GRADE_SCORE = { 'A+': 12, A: 11, 'A-': 10, 'B+': 9, B: 8, 'B-': 7, 'C+': 6, C: 5, 'C-': 4, 'D+': 3, D: 2, 'D-': 1, F: 0 };
+
+function computePlayoffOdds(liveData, remainingWeeksMatchups, divOrder, restOrder, iterations = 1500) {
+  const allTeams = [...liveData['Bad Little Boys'], ...liveData['Mid Little Boys'], ...liveData['Good Little Boys']];
+
+  const power = {};
+  allTeams.forEach((t) => {
+    const gp = t.w + t.l;
+    const record = gp > 0 ? t.w / gp : 0.5;
+    const draftScore = (DRAFT_GRADE_SCORE[t.draftGrade] ?? 6) / 12;
+    const weight = Math.min(gp / 14, 1); // fades from draft-grade-based to pure record as the season goes
+    power[t.nick] = weight * record + (1 - weight) * draftScore;
+  });
+
+  const divNameOf = {};
+  ['Bad Little Boys', 'Mid Little Boys', 'Good Little Boys'].forEach((dn) => {
+    liveData[dn].forEach((t) => { divNameOf[t.nick] = dn; });
+  });
+
+  const playoffCount = {};
+  allTeams.forEach((t) => { playoffCount[t.nick] = 0; });
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const sim = {};
+    allTeams.forEach((t) => { sim[t.nick] = { ...t }; });
+
+    remainingWeeksMatchups.forEach((week) => {
+      week.forEach(([a, b]) => {
+        if (!sim[a] || !sim[b]) return;
+        const pa = power[a] ?? 0.5, pb = power[b] ?? 0.5;
+        const prob = 1 / (1 + Math.pow(10, -(pa - pb) * 4)); // logistic, gentler than a true Elo curve to reflect fantasy's real week-to-week variance
+        const aWins = Math.random() < prob;
+        if (aWins) { sim[a].w++; sim[b].l++; } else { sim[b].w++; sim[a].l++; }
+        if (divNameOf[a] === divNameOf[b]) {
+          if (aWins) { sim[a].divW++; sim[b].divL++; } else { sim[b].divW++; sim[a].divL++; }
+        }
+      });
+    });
+
+    const byDiv = { 'Bad Little Boys': [], 'Mid Little Boys': [], 'Good Little Boys': [] };
+    Object.values(sim).forEach((t) => { byDiv[divNameOf[t.nick]].push(t); });
+
+    const rankMap = buildOverallRankMap(divOrder, restOrder, byDiv);
+    Object.keys(rankMap).forEach((nick) => {
+      if (rankMap[nick] <= 6) playoffCount[nick]++;
+    });
+  }
+
+  const odds = {};
+  allTeams.forEach((t) => { odds[t.nick] = Math.round((playoffCount[t.nick] / iterations) * 100); });
+
+  // Remaining strength of schedule: average power rating of remaining opponents
+  const sosAccum = {};
+  allTeams.forEach((t) => { sosAccum[t.nick] = []; });
+  remainingWeeksMatchups.forEach((week) => {
+    week.forEach(([a, b]) => {
+      if (sosAccum[a]) sosAccum[a].push(power[b] ?? 0.5);
+      if (sosAccum[b]) sosAccum[b].push(power[a] ?? 0.5);
+    });
+  });
+  const sos = {};
+  allTeams.forEach((t) => {
+    const arr = sosAccum[t.nick];
+    sos[t.nick] = arr.length ? Math.round((arr.reduce((s, v) => s + v, 0) / arr.length) * 100) : 50;
+  });
+
+  return { odds, sos };
+}
+
+function usePlayoffOdds(liveData, currentWeek, divOrder, restOrder) {
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!liveData || !currentWeek) return;
+    setLoading(true);
+    setError(null);
+
+    const weeksToFetch = [];
+    for (let w = currentWeek; w <= 17; w++) weeksToFetch.push(w);
+
+    Promise.all(
+      weeksToFetch.map((w) =>
+        fetch(`${API_BASE_URL}/api/schedule?week=${w}`)
+          .then((res) => (res.ok ? res.json() : null))
+          .catch(() => null)
+      )
+    )
+      .then((results) => {
+        const remainingWeeksMatchups = results.map((json) => {
+          const matchupsObj = json?.fantasy_content?.league?.[1]?.scoreboard?.[0]?.matchups;
+          if (!matchupsObj) return [];
+          const pairs = [];
+          Object.keys(matchupsObj).forEach((key) => {
+            if (key === 'count') return;
+            const teamsObj = matchupsObj[key].matchup[0]?.teams;
+            if (!teamsObj) return;
+            const t0 = teamsObj['0']?.team, t1 = teamsObj['1']?.team;
+            if (!t0 || !t1) return;
+            const meta0 = flattenYahooMeta(t0[0]);
+            const meta1 = flattenYahooMeta(t1[0]);
+            const nick0 = YAHOO_TEAM_ID_TO_NICK[Number(meta0.team_id)];
+            const nick1 = YAHOO_TEAM_ID_TO_NICK[Number(meta1.team_id)];
+            if (nick0 && nick1) pairs.push([nick0, nick1]);
+          });
+          return pairs;
+        });
+
+        const computed = computePlayoffOdds(liveData, remainingWeeksMatchups, divOrder, restOrder);
+        setResult(computed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [liveData, currentWeek, divOrder, restOrder]);
+
+  return { result, loading, error };
 }
 
 
@@ -1150,7 +1277,8 @@ const PLAYOFF_ODDS = {
 
 function PlayoffsPage({ c, accent, divOrder, restOrder }) {
   const [view, setView] = useState('playoff');
-  const { data: liveData, loading, error } = useLiveStandings();
+  const { data: liveData, loading, error, currentWeek } = useLiveStandings();
+  const { result: oddsResult, loading: oddsLoading } = usePlayoffOdds(liveData, currentWeek, divOrder, restOrder);
   const rankMap = buildOverallRankMap(divOrder, restOrder, liveData);
   const allTeams = liveData
     ? [...liveData['Bad Little Boys'], ...liveData['Mid Little Boys'], ...liveData['Good Little Boys']]
@@ -1199,21 +1327,33 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
         )}
       </div>
 
-      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(sample &mdash; Yahoo doesn't provide odds/SOS data)</span></div>
+      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(simulated from real record, draft grade &amp; remaining schedule)</span></div>
+      <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
+        {oddsLoading && 'Running the simulation against the real remaining schedule\u2026'}
+        {!oddsLoading && oddsResult && 'Recalculated weekly \u2014 blends current record with real draft grade early on, and simulates the rest of the real schedule thousands of times to estimate each team\u2019s odds.'}
+      </div>
       <div className="space-y-2">
-        {Object.entries(PLAYOFF_ODDS)
-          .sort((a, b) => rankMap[a[0]] - rankMap[b[0]])
-          .map(([nick, d]) => {
+        {allTeams
+          .slice()
+          .sort((a, b) => rankMap[a.nick] - rankMap[b.nick])
+          .map((t) => {
+            const nick = t.nick;
             const inPlayoffs = rankMap[nick] <= 6;
+            const odds = oddsResult ? oddsResult.odds[nick] : 50;
+            const sos = oddsResult ? oddsResult.sos[nick] : null;
+            const sixthSeed = bySeed(6);
+            const gb = !inPlayoffs && sixthSeed
+              ? Math.max(0, ((sixthSeed.w - t.w) + (t.l - sixthSeed.l)) / 2)
+              : 0;
             return (
               <Panel key={nick} c={c} style={{ padding: 12 }}>
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-sm font-semibold" style={{ color: c.text }}>#{rankMap[nick]} &middot; {nick}</span>
-                  <span className="text-sm font-bold" style={{ fontFamily: MONO, color: inPlayoffs ? c.win : c.subtext }}>{d.odds}%</span>
+                  <span className="text-sm font-bold" style={{ fontFamily: MONO, color: inPlayoffs ? c.win : c.subtext }}>{odds}%</span>
                 </div>
                 <div className="flex items-center justify-between text-[10px]" style={{ color: c.subtextFaint }}>
-                  <span>SOS remaining: {d.sos}</span>
-                  {d.gb > 0 && <span>{d.gb} GB</span>}
+                  <span>SOS remaining: {sos !== null ? sos : '\u2014'}</span>
+                  {gb > 0 && <span>{gb} GB</span>}
                 </div>
               </Panel>
             );
