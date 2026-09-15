@@ -541,6 +541,178 @@ function useSeasonDetail(year) {
   return { rows, draftByNick, moves, loading, error };
 }
 
+// --- Every weekly matchup, every season — powers Head-to-Head, Team
+// Points records, Fun facts, and the What-If schedule swap. ---
+function resolveMatchupNick(nickname, teamName, ryanState) {
+  let nick = MANAGER_NICKNAME_TO_NICK[nickname];
+  if (!nick && nickname === 'Ryan') {
+    if ((teamName || '').includes('Gojo')) nick = 'Zai';
+    else { nick = ryanState.count === 0 ? 'Zai' : 'Twizzy'; ryanState.count++; }
+  }
+  return nick || nickname || teamName || 'Unknown';
+}
+
+function parseAllScores(json) {
+  if (!Array.isArray(json)) return null;
+  const ryanState = { count: 0 };
+  return json.map((m) => ({
+    season: m.season,
+    week: m.week,
+    teamA: { nick: resolveMatchupNick(m.teamA.nickname, m.teamA.name, ryanState), points: m.teamA.points },
+    teamB: { nick: resolveMatchupNick(m.teamB.nickname, m.teamB.name, ryanState), points: m.teamB.points },
+  }));
+}
+
+function computeH2H(allScores, nickA, nickB) {
+  if (!allScores) return null;
+  let w = 0, l = 0;
+  allScores.forEach((m) => {
+    const isAvB = m.teamA.nick === nickA && m.teamB.nick === nickB;
+    const isBvA = m.teamA.nick === nickB && m.teamB.nick === nickA;
+    if (!isAvB && !isBvA) return;
+    const aPts = isAvB ? m.teamA.points : m.teamB.points;
+    const bPts = isAvB ? m.teamB.points : m.teamA.points;
+    if (aPts > bPts) w++;
+    else if (bPts > aPts) l++;
+  });
+  return { w, l };
+}
+
+
+function useAllScores() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/all-scores`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Backend returned an error');
+        return res.json();
+      })
+      .then((json) => {
+        const parsed = parseAllScores(json);
+        if (!parsed) throw new Error('Unexpected response shape');
+        setData(parsed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return { data, loading, error };
+}
+
+
+
+function usePlayerStats() {
+  const [status, setStatus] = useState('idle');
+  const [progress, setProgress] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [started, setStarted] = useState(false);
+
+  useEffect(() => {
+    if (!started) return;
+    let cancelled = false;
+    const poll = () => {
+      fetch(`${API_BASE_URL}/api/player-stats`)
+        .then((res) => res.json())
+        .then((json) => {
+          if (cancelled) return;
+          setStatus(json.status);
+          if (json.status === 'computing') {
+            setProgress(json.progress || 0);
+            setTotal(json.total || 0);
+            setTimeout(poll, 5000);
+          } else if (json.status === 'done') {
+            setData(json.data);
+          } else if (json.status === 'error') {
+            setError(json.error);
+          }
+        })
+        .catch((err) => { if (!cancelled) setError(err.message); });
+    };
+    poll();
+    return () => { cancelled = true; };
+  }, [started]);
+
+  const start = () => setStarted(true);
+  return { status, progress, total, data, error, start };
+}
+
+const STAT_MATCHERS = {
+  touchdowns: /td/i,
+  passingYards: /pass.*yd/i,
+  rushingYards: /rush.*yd/i,
+  receivingYards: /rec.*yd/i,
+  fieldGoals: /^fg(?!.*miss)/i,
+};
+
+function computeRealTeamStats(playerWeeks) {
+  if (!playerWeeks || !playerWeeks.length) return null;
+
+  // Team-week totals per category, summed across every rostered player
+  // that team-week (starters + bench, since "team stats" here means
+  // everything the roster produced that week, not just who started).
+  const teamWeekTotals = {};
+  playerWeeks.forEach((pw) => {
+    const key = `${pw.teamNickname || pw.teamName}-${pw.season}-${pw.week}`;
+    if (!teamWeekTotals[key]) {
+      teamWeekTotals[key] = { nickname: pw.teamNickname, teamName: pw.teamName, season: pw.season, week: pw.week, touchdowns: 0, passingYards: 0, rushingYards: 0, receivingYards: 0, fieldGoals: 0 };
+    }
+    Object.entries(pw.stats || {}).forEach(([name, value]) => {
+      Object.entries(STAT_MATCHERS).forEach(([cat, regex]) => {
+        if (regex.test(name)) teamWeekTotals[key][cat] += value;
+      });
+    });
+  });
+
+  const rows = Object.values(teamWeekTotals);
+  const ryanState = { count: 0 };
+  const resolveTeamNick = (r) => resolveMatchupNick(r.nickname, r.teamName, ryanState);
+
+  const seasonTotals = {}; // per nick+season, for "Season, All-Time" per category
+  rows.forEach((r) => {
+    const nick = resolveTeamNick(r);
+    const key = `${nick}-${r.season}`;
+    if (!seasonTotals[key]) seasonTotals[key] = { nick, season: r.season, touchdowns: 0, passingYards: 0, rushingYards: 0, receivingYards: 0, fieldGoals: 0 };
+    ['touchdowns', 'passingYards', 'rushingYards', 'receivingYards', 'fieldGoals'].forEach((cat) => {
+      seasonTotals[key][cat] += r[cat];
+    });
+  });
+
+  const bestSingleWeek = (cat) => rows.reduce((best, r) => (!best || r[cat] > best[cat] ? r : best), null);
+  const bestSeason = (cat) => Object.values(seasonTotals).reduce((best, s) => (!best || s[cat] > best[cat] ? s : best), null);
+
+  const weekLabel = (r) => ({ name: `${displayName(resolveTeamNick(r))}`, context: `Wk ${r.week}, ${r.season}` });
+  const seasonLabel = (s) => ({ name: displayName(s.nick), context: String(s.season) });
+
+  const tdWeek = bestSingleWeek('touchdowns'), tdSeason = bestSeason('touchdowns');
+  const passWeek = bestSingleWeek('passingYards');
+  const rushWeek = bestSingleWeek('rushingYards');
+  const recSeason = bestSeason('receivingYards');
+  const fgSeason = bestSeason('fieldGoals');
+
+  return [
+    { section: 'Touchdowns — Most', rows: [
+      { label: 'Single Week', value: String(tdWeek.touchdowns), holders: [weekLabel(tdWeek)] },
+      { label: 'Season, All-Time', value: String(tdSeason.touchdowns), holders: [seasonLabel(tdSeason)] },
+    ]},
+    { section: 'Passing Yards — Most', rows: [
+      { label: 'Single Week', value: passWeek.passingYards.toFixed(0), holders: [weekLabel(passWeek)] },
+    ]},
+    { section: 'Rushing Yards — Most', rows: [
+      { label: 'Single Week', value: rushWeek.rushingYards.toFixed(0), holders: [weekLabel(rushWeek)] },
+    ]},
+    { section: 'Receiving Yards — Most', rows: [
+      { label: 'Season, All-Time', value: recSeason.receivingYards.toFixed(0), holders: [seasonLabel(recSeason)] },
+    ]},
+    { section: 'Field Goals — Most', rows: [
+      { label: 'Season, All-Time', value: fgSeason.fieldGoals.toFixed(0), holders: [seasonLabel(fgSeason)] },
+    ]},
+  ];
+}
 
 // ============================= THEME =============================
 const THEMES = {
@@ -1533,6 +1705,7 @@ function TeamsPage({ c, accent }) {
   const bio = TEAM_BIOS[selected];
   const [expanded, setExpanded] = useState(false);
   const { data: liveStandings } = useLiveStandings();
+  const { data: allScores, loading: scoresLoading } = useAllScores();
 
   const otherTeams = allTeams.filter((t) => t.nick !== selected);
   const livePhoto = liveStandings
@@ -1602,13 +1775,17 @@ function TeamsPage({ c, accent }) {
 
           <div>
             <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>All-Time Record vs. Everyone</div>
+            {scoresLoading && <p className="text-xs mb-2" style={{ color: c.subtextFaint }}>Loading real head-to-head records from Yahoo… (this one takes a bit longer)</p>}
             <Panel c={c} style={{ overflow: 'hidden' }}>
-              {otherTeams.map((t, i) => (
-                <div key={t.nick} className="flex items-center justify-between px-3 py-2" style={{ borderBottom: i < otherTeams.length - 1 ? `1px solid ${c.borderSoft}` : 'none' }}>
-                  <span className="text-xs" style={{ color: c.text }}>{displayName(t.nick)}</span>
-                  <span className="text-xs" style={{ fontFamily: MONO, color: c.subtextFaint }}>{2 + (i % 3)}-{1 + (i % 2)}</span>
-                </div>
-              ))}
+              {otherTeams.map((t, i) => {
+                const h2h = computeH2H(allScores, selected, t.nick);
+                return (
+                  <div key={t.nick} className="flex items-center justify-between px-3 py-2" style={{ borderBottom: i < otherTeams.length - 1 ? `1px solid ${c.borderSoft}` : 'none' }}>
+                    <span className="text-xs" style={{ color: c.text }}>{displayName(t.nick)}</span>
+                    <span className="text-xs" style={{ fontFamily: MONO, color: c.subtextFaint }}>{h2h ? `${h2h.w}-${h2h.l}` : '—'}</span>
+                  </div>
+                );
+              })}
             </Panel>
           </div>
         </div>
@@ -1618,26 +1795,43 @@ function TeamsPage({ c, accent }) {
 }
 
 // ============================= WHAT IF SIMULATOR =============================
-function scheduleSwapResult(teamNick, otherNick) {
-  const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
-  const team = allTeams.find((t) => t.nick === teamNick);
-  const other = allTeams.find((t) => t.nick === otherNick);
-  const seed = hashNick(teamNick + otherNick);
-  const winDelta = (seed % 5) - 2; // -2 to +2
-  const totalGames = team.w + team.l;
-  const newW = Math.max(0, Math.min(totalGames, team.w + winDelta));
-  const newL = totalGames - newW;
+function getTeamWeeklyResults(allScores, nick, season, maxWeek) {
+  const results = [];
+  allScores.forEach((m) => {
+    if (m.season !== season || m.week > maxWeek) return;
+    if (m.teamA.nick === nick) results.push({ week: m.week, ownPoints: m.teamA.points, oppNick: m.teamB.nick, oppPoints: m.teamB.points });
+    else if (m.teamB.nick === nick) results.push({ week: m.week, ownPoints: m.teamB.points, oppNick: m.teamA.nick, oppPoints: m.teamA.points });
+  });
+  return results.sort((a, b) => a.week - b.week);
+}
 
+function scheduleSwapResult(allScores, teamNick, otherNick, season, maxWeek) {
+  const teamGames = getTeamWeeklyResults(allScores, teamNick, season, maxWeek);
+  const otherGames = getTeamWeeklyResults(allScores, otherNick, season, maxWeek);
+  if (!teamGames.length || !otherGames.length) return null;
+
+  const actualW = teamGames.filter((g) => g.ownPoints > g.oppPoints).length;
+  const actualL = teamGames.filter((g) => g.ownPoints < g.oppPoints).length;
+
+  let newW = 0, newL = 0;
+  otherGames.forEach((og) => {
+    const teamWeek = teamGames.find((g) => g.week === og.week);
+    if (!teamWeek) return; // team didn't have a game that week — skip
+    if (teamWeek.ownPoints > og.oppPoints) newW++;
+    else if (teamWeek.ownPoints < og.oppPoints) newL++;
+  });
+
+  const delta = newW - actualW;
   let blurb;
-  if (winDelta > 0) {
-    blurb = `${displayName(other.nick)}'s schedule was noticeably softer, especially in the middle stretch of the season.`;
-  } else if (winDelta < 0) {
-    blurb = `${displayName(other.nick)}'s schedule was actually tougher than it looked — more games against the league's stronger teams.`;
+  if (delta > 0) {
+    blurb = `${displayName(otherNick)}'s real schedule was softer — ${displayName(teamNick)} would have picked up ${delta} more win${delta === 1 ? '' : 's'} using real weekly scores from that season.`;
+  } else if (delta < 0) {
+    blurb = `${displayName(otherNick)}'s real schedule was actually tougher — ${displayName(teamNick)} would have lost ${Math.abs(delta)} more game${Math.abs(delta) === 1 ? '' : 's'} using real weekly scores from that season.`;
   } else {
-    blurb = `Surprisingly close to a wash — ${displayName(other.nick)}'s schedule was roughly the same difficulty, just with the tough matchups landing in different weeks.`;
+    blurb = `Basically a wash — ${displayName(otherNick)}'s real schedule was about as tough as ${displayName(teamNick)}'s own that season.`;
   }
 
-  return { actualRecord: `${team.w}-${team.l}`, newRecord: `${newW}-${newL}`, delta: winDelta, blurb };
+  return { actualRecord: `${actualW}-${actualL}`, newRecord: `${newW}-${newL}`, delta, blurb };
 }
 
 function computeMedianStandings(divOrder, restOrder) {
@@ -1697,14 +1891,16 @@ function computeMedianStandings(divOrder, restOrder) {
 function WhatIfSimulatorPage({ c, accent }) {
   const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
   const [mode, setMode] = useState('schedule');
+  const [year, setYear] = useState(2026);
   const [team, setTeam] = useState(allTeams[0].nick);
   const [other, setOther] = useState(allTeams[1].nick);
   const [result, setResult] = useState(null);
   const [medianStandings, setMedianStandings] = useState(null);
+  const { data: allScores, loading: scoresLoading, error: scoresError } = useAllScores();
 
   const runSim = () => {
     if (mode === 'schedule') {
-      setResult(scheduleSwapResult(team, other));
+      setResult(allScores ? scheduleSwapResult(allScores, team, other, year, 14) : null);
     } else {
       setMedianStandings(computeMedianStandings(['divRecord', 'pf', 'h2h'], ['pf', 'divRecord', 'h2h']));
     }
@@ -1748,7 +1944,10 @@ function WhatIfSimulatorPage({ c, accent }) {
     <div>
       <SectionHeader title="What If Simulator" c={c} accent={accent} />
       <div className="mb-4 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        Sample logic shown &mdash; real simulations run off actual weekly scores once Yahoo is connected.
+        {mode === 'schedule' && scoresLoading && 'Loading real weekly scores from Yahoo… (this one takes a bit longer)'}
+        {mode === 'schedule' && !scoresLoading && scoresError && `Couldn't load real scores (${scoresError}).`}
+        {mode === 'schedule' && !scoresLoading && !scoresError && 'Runs off real weekly scores from Yahoo — regular season only (weeks 1–14).'}
+        {mode === 'median' && "Sample logic shown — real median-format simulation coming later."}
       </div>
 
       <div className="flex gap-1 mb-4 rounded-lg border p-1" style={{ borderColor: c.border, backgroundColor: c.panel }}>
@@ -1765,6 +1964,10 @@ function WhatIfSimulatorPage({ c, accent }) {
       <Panel c={c} style={{ padding: 16, marginBottom: 16 }}>
         {mode === 'schedule' && (
           <>
+            <div className="text-[10px] uppercase tracking-wider mb-1.5" style={{ color: c.subtextFaint }}>Season</div>
+            <select value={year} onChange={(e) => { setYear(Number(e.target.value)); setResult(null); }} className="w-full text-sm rounded-md px-3 py-2 border font-medium mb-3" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
+              {[2026, 2025, 2024, 2023, 2022].map((y) => <option key={y} value={y}>{y}</option>)}
+            </select>
             <div className="text-[10px] uppercase tracking-wider mb-1.5" style={{ color: c.subtextFaint }}>Your Team</div>
             <select value={team} onChange={(e) => { setTeam(e.target.value); setResult(null); }} className="w-full text-sm rounded-md px-3 py-2 border font-medium mb-3" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
               {allTeams.map((t) => <option key={t.nick} value={t.nick}>{t.team}</option>)}
@@ -2090,8 +2293,166 @@ function ChampionYearCard({ ch, c, accent }) {
 }
 
 // ============================= RECORD BOOK =============================
+function computeRealRecordBook(allScores) {
+  if (!allScores || !allScores.length) return null;
+
+  // Per-nick chronological game log, for streaks and career W-L
+  const byNick = {};
+  const addGame = (nick, season, week, result, label, context) => {
+    if (!byNick[nick]) byNick[nick] = [];
+    byNick[nick].push({ season, week, result, label, context });
+  };
+  allScores.forEach((m) => {
+    const aWin = m.teamA.points > m.teamB.points;
+    const bWin = m.teamB.points > m.teamA.points;
+    if (aWin) {
+      addGame(m.teamA.nick, m.season, m.week, 'W');
+      addGame(m.teamB.nick, m.season, m.week, 'L');
+    } else if (bWin) {
+      addGame(m.teamB.nick, m.season, m.week, 'W');
+      addGame(m.teamA.nick, m.season, m.week, 'L');
+    }
+  });
+
+  let mostWins = { nick: null, count: -1 };
+  let mostLosses = { nick: null, count: -1 };
+  let longestWinStreak = { nick: null, count: 0, context: '' };
+  let longestLossStreak = { nick: null, count: 0, context: '' };
+  const currentStreaks = [];
+
+  Object.keys(byNick).forEach((nick) => {
+    const games = byNick[nick].sort((a, b) => a.season - b.season || a.week - b.week);
+    const wins = games.filter((g) => g.result === 'W').length;
+    const losses = games.filter((g) => g.result === 'L').length;
+    if (wins > mostWins.count) mostWins = { nick, count: wins };
+    if (losses > mostLosses.count) mostLosses = { nick, count: losses };
+
+    let curType = null, curLen = 0, bestW = 0, bestWCtx = '', bestL = 0, bestLCtx = '', runStart = null;
+    games.forEach((g, i) => {
+      if (g.result === curType) { curLen++; } else { curType = g.result; curLen = 1; runStart = g; }
+      if (curType === 'W' && curLen > bestW) { bestW = curLen; bestWCtx = `${runStart.season}`; }
+      if (curType === 'L' && curLen > bestL) { bestL = curLen; bestLCtx = `${runStart.season}`; }
+    });
+    if (bestW > longestWinStreak.count) longestWinStreak = { nick, count: bestW, context: bestWCtx };
+    if (bestL > longestLossStreak.count) longestLossStreak = { nick, count: bestL, context: bestLCtx };
+
+    const last = games[games.length - 1];
+    if (last) {
+      let streakLen = 1;
+      for (let i = games.length - 2; i >= 0 && games[i].result === last.result; i--) streakLen++;
+      currentStreaks.push({ nick, label: `${last.result}${streakLen}` });
+    }
+  });
+
+  // Single-week extremes across every real matchup
+  let highWeek = null, lowWeek = null, bigMargin = null, closeMargin = null, beautifulLoser = null;
+  allScores.forEach((m) => {
+    [{ team: m.teamA, opp: m.teamB }, { team: m.teamB, opp: m.teamA }].forEach(({ team, opp }) => {
+      const label = `${displayName(team.nick)} vs. ${displayName(opp.nick)}`;
+      const context = `Wk ${m.week}, ${m.season}`;
+      if (!highWeek || team.points > highWeek.value) highWeek = { value: team.points, label, context };
+      if (!lowWeek || team.points < lowWeek.value) lowWeek = { value: team.points, label, context };
+      if (team.points < opp.points && (!beautifulLoser || team.points > beautifulLoser.value)) {
+        beautifulLoser = { value: team.points, label, context };
+      }
+    });
+    const margin = Math.abs(m.teamA.points - m.teamB.points);
+    const label = `${displayName(m.teamA.nick)} vs. ${displayName(m.teamB.nick)}`;
+    const context = `Wk ${m.week}, ${m.season}`;
+    if (!bigMargin || margin > bigMargin.value) bigMargin = { value: margin, label, context };
+    if (!closeMargin || margin < closeMargin.value) closeMargin = { value: margin, label, context };
+  });
+
+  // Season point totals per nick (for "Season, All-Time" record)
+  const seasonTotals = {};
+  allScores.forEach((m) => {
+    [m.teamA, m.teamB].forEach((t) => {
+      const key = `${t.nick}-${m.season}`;
+      seasonTotals[key] = (seasonTotals[key] || 0) + t.points;
+    });
+  });
+  let bestSeason = null;
+  Object.keys(seasonTotals).forEach((key) => {
+    const [nick, season] = key.split('-');
+    if (!bestSeason || seasonTotals[key] > bestSeason.value) bestSeason = { value: seasonTotals[key], nick, season };
+  });
+
+  // Championship lore from the real CHAMPIONS array
+  const champCounts = {};
+  CHAMPIONS.forEach((ch) => {
+    champCounts[ch.champion] = (champCounts[ch.champion] || { first: 0, second: 0 });
+    champCounts[ch.champion].first = (champCounts[ch.champion].first || 0) + 1;
+    champCounts[ch.runnerUp] = champCounts[ch.runnerUp] || { first: 0, second: 0 };
+    champCounts[ch.runnerUp].second = (champCounts[ch.runnerUp].second || 0) + 1;
+  });
+  let mostChamps = { nick: null, count: -1 };
+  let mostRunnerUps = { nick: null, count: -1 };
+  Object.keys(champCounts).forEach((nick) => {
+    if (champCounts[nick].first > mostChamps.count) mostChamps = { nick, count: champCounts[nick].first };
+    if (champCounts[nick].second > mostRunnerUps.count) mostRunnerUps = { nick, count: champCounts[nick].second };
+  });
+
+  const holder = (nick, context) => [{ name: displayName(nick), context }];
+
+  return {
+    h2h: [
+      { section: 'Wins', rows: [
+        { label: 'Most Wins (All-Time, Real)', value: String(mostWins.count), holders: holder(mostWins.nick) },
+        { label: 'Longest Win Streak', value: String(longestWinStreak.count), holders: holder(longestWinStreak.nick, longestWinStreak.context) },
+        { label: 'Current Streaks', value: '', holders: currentStreaks.filter((s) => s.label[0] === 'W').sort((a, b) => Number(b.label.slice(1)) - Number(a.label.slice(1))).slice(0, 3).map((s) => ({ name: displayName(s.nick), context: s.label })) },
+      ]},
+      { section: 'Losses', rows: [
+        { label: 'Most Losses (All-Time, Real)', value: String(mostLosses.count), holders: holder(mostLosses.nick) },
+        { label: 'Longest Losing Streak', value: String(longestLossStreak.count), holders: holder(longestLossStreak.nick, longestLossStreak.context) },
+        { label: 'Current Streaks', value: '', holders: currentStreaks.filter((s) => s.label[0] === 'L').sort((a, b) => Number(b.label.slice(1)) - Number(a.label.slice(1))).slice(0, 3).map((s) => ({ name: displayName(s.nick), context: s.label })) },
+      ]},
+      { section: 'Margin of Victory — Largest', rows: [
+        { label: 'Single Week', value: bigMargin.value.toFixed(1), holders: [{ name: bigMargin.label, context: bigMargin.context }] },
+      ]},
+      { section: 'Margin of Victory — Smallest', rows: [
+        { label: 'Single Week', value: closeMargin.value.toFixed(1), holders: [{ name: closeMargin.label, context: closeMargin.context }] },
+      ]},
+    ],
+    points: [
+      { section: 'Team Points — Most', rows: [
+        { label: 'Single Week', value: highWeek.value.toFixed(1), holders: [{ name: highWeek.label, context: highWeek.context }] },
+        { label: 'Season, All-Time', value: bestSeason.value.toFixed(0), holders: holder(bestSeason.nick, bestSeason.season) },
+      ]},
+      { section: 'Team Points — Least', rows: [
+        { label: 'Single Week', value: lowWeek.value.toFixed(1), holders: [{ name: lowWeek.label, context: lowWeek.context }] },
+      ]},
+    ],
+    fun: [
+      { section: 'Extremes', rows: [
+        { label: 'Highest Score in a Loss ("Beautiful Loser")', value: beautifulLoser.value.toFixed(1), holders: [{ name: beautifulLoser.label, context: beautifulLoser.context }] },
+      ]},
+      { section: 'Championship Lore', rows: [
+        { label: 'Most Championships', value: String(mostChamps.count), holders: holder(mostChamps.nick) },
+        { label: 'Most Runner-Up Finishes ("Bridesmaid")', value: String(mostRunnerUps.count), holders: holder(mostRunnerUps.nick) },
+      ]},
+    ],
+  };
+}
+
 function RecordBookPage({ c, accent }) {
   const [tab, setTab] = useState('champions');
+  const { data: allScores, loading: scoresLoading } = useAllScores();
+  const playerStats = usePlayerStats();
+  const realRecords = allScores ? computeRealRecordBook(allScores) : null;
+  const realTeamStats = playerStats.data ? computeRealTeamStats(playerStats.data) : null;
+  const mergedBook = { ...RECORD_BOOK };
+  if (realRecords) {
+    ['h2h', 'points', 'fun'].forEach((cat) => {
+      const realSections = realRecords[cat];
+      const realTitles = new Set(realSections.map((s) => s.section));
+      mergedBook[cat] = [...realSections, ...RECORD_BOOK[cat].filter((s) => !realTitles.has(s.section))];
+    });
+  }
+  if (realTeamStats) {
+    const realTitles = new Set(realTeamStats.map((s) => s.section));
+    mergedBook.stats = [...realTeamStats, ...RECORD_BOOK.stats.filter((s) => !realTitles.has(s.section))];
+  }
+
   const tabs = [
     { id: 'champions', label: 'Championship History' },
     { id: 'h2h', label: 'Head-to-Head' },
@@ -2103,7 +2464,8 @@ function RecordBookPage({ c, accent }) {
     <div>
       <SectionHeader title="Record Book" c={c} accent={accent} />
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        Sample records shown &mdash; Head-to-Head, Team Points, and Team Stats populate directly from Yahoo's own record tracking once connected.
+        {scoresLoading && 'Loading real records from Yahoo… (this one takes a bit longer)'}
+        {!scoresLoading && 'Head-to-Head, Team Points, and Fun records are real, computed from every real weekly score. Team Stats (TDs, yards, FGs) needs a much bigger pull — see that tab to start it.'}
       </div>
       <div className="flex gap-1 mb-4 rounded-lg border p-1 overflow-x-auto" style={{ borderColor: c.border, backgroundColor: c.panel }}>
         {tabs.map((t) => (
@@ -2120,7 +2482,30 @@ function RecordBookPage({ c, accent }) {
         </div>
       ) : (
         <div className="space-y-5">
-          {RECORD_BOOK[tab].map((sec) => (
+          {tab === 'stats' && !realTeamStats && (
+            <Panel c={c} style={{ padding: 16 }}>
+              {playerStats.status === 'idle' && (
+                <>
+                  <p className="text-xs mb-3" style={{ color: c.subtext }}>
+                    This pulls every rostered player's stat line, every week, every season — roughly 2,000+ Yahoo API calls. It runs in the background and takes several minutes.
+                  </p>
+                  <button onClick={playerStats.start} className="w-full text-sm font-semibold py-2.5 rounded-md" style={{ backgroundColor: accent, color: '#0A0D0A' }}>
+                    Start Loading Team Stats
+                  </button>
+                </>
+              )}
+              {playerStats.status === 'computing' && (
+                <>
+                  <p className="text-xs mb-2" style={{ color: c.subtext }}>Computing… this can take several minutes. Feel free to check back later — it keeps running in the background.</p>
+                  <div className="text-xs" style={{ fontFamily: MONO, color: accent }}>{playerStats.progress} / {playerStats.total || '?'} team-weeks processed</div>
+                </>
+              )}
+              {playerStats.status === 'error' && (
+                <p className="text-xs" style={{ color: c.loss }}>Couldn't load Team Stats ({playerStats.error}). Try again later.</p>
+              )}
+            </Panel>
+          )}
+          {mergedBook[tab].map((sec) => (
             <div key={sec.section}>
               <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>{sec.section}</div>
               <Panel c={c} style={{ overflow: 'hidden' }}>
