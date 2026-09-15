@@ -17,6 +17,30 @@ const YAHOO_TEAM_ID_TO_NICK = {
 };
 const YAHOO_DIVISION_ID_TO_NAME = { 1: 'Bad Little Boys', 2: 'Mid Little Boys', 3: 'Good Little Boys' };
 
+// Real first names for display, everywhere \u2014 internal nick codes (NJ,
+// RB, Okarp, etc.) stay as the technical identifier for keys/lookups only
+// and should never be shown to the user directly. The two Ryans are
+// disambiguated as "Ryan B" and "Ryan A" per Nathan's preference.
+const NICK_TO_FIRST_NAME = {
+  NJ: 'Nathan', RB: 'Rabeea', Bodge: 'Brady', Mr: 'Brendan', Okarp: 'Owen',
+  'Glo pup': 'Trey', Rooby: 'Mehrob', Gill: 'Matthew', Zai: 'Ryan B',
+  Bronnie: 'Benjamin', Twizzy: 'Ryan A', Skeo: 'Sean',
+};
+function displayName(nick) {
+  return NICK_TO_FIRST_NAME[nick] || nick;
+}
+// For strings that embed a nick inside longer text (e.g. "NJ vs. Bodge",
+// "Gill vs. RB, Wk 5") \u2014 replaces every whole-word nick match with the
+// real first name.
+function expandNames(text) {
+  if (!text) return text;
+  return Object.keys(NICK_TO_FIRST_NAME).reduce((acc, nick) => {
+    const escaped = nick.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`, 'g');
+    return acc.replace(regex, NICK_TO_FIRST_NAME[nick]);
+  }, text);
+}
+
 // Yahoo's team objects are arrays mixing real data objects with empty-array
 // placeholders — this merges all the real objects into one flat lookup.
 function flattenYahooMeta(arr) {
@@ -600,7 +624,7 @@ const CHAMPIONS = [
   { year: 2025, champion: 'Skeo', runnerUp: 'NJ', third: 'Rooby', lastPlace: 'Twizzy', toiletBowlWinner: 'Okarp', toiletBowlLoser: 'Twizzy', mostPF: 'Glo pup', mostPA: 'Glo pup', badDivWinner: 'Skeo', goodDivWinner: 'NJ' },
   { year: 2024, champion: 'Gill', runnerUp: 'Okarp', third: 'Bodge', lastPlace: 'Glo pup', toiletBowlWinner: 'RB', toiletBowlLoser: 'Glo pup', mostPF: 'Okarp', mostPA: 'Zai', badDivWinner: 'Bodge', goodDivWinner: 'Gill' },
   { year: 2023, champion: 'RB', runnerUp: 'NJ', third: 'Zai', lastPlace: 'Rooby', toiletBowlWinner: 'Bodge', toiletBowlLoser: 'Rooby', mostPF: 'Zai', mostPA: 'Rooby', badDivWinner: 'Zai', goodDivWinner: 'RB' },
-  { year: 2022, champion: 'Bodge', runnerUp: 'Skeo', third: 'RB', lastPlace: 'Zai', toiletBowlWinner: 'Gill', toiletBowlLoser: 'Okarp', mostPF: 'Bodge', mostPA: 'Okarp', badDivWinner: 'Skeo', goodDivWinner: 'Bodge' }, // unverified — played under a separate, unlinked Yahoo league
+  { year: 2022, champion: 'Okarp', runnerUp: 'Bodge', third: 'Bronnie', lastPlace: 'Zai', toiletBowlWinner: 'Gill', toiletBowlLoser: 'Zai', mostPF: 'Gill', mostPA: 'Zai', badDivWinner: 'Bronnie', goodDivWinner: 'Bodge' }, // unverified — played under a separate, unlinked Yahoo league. Division names that year were "Straight Men" (Bronnie) and "Gay Men" (Bodge)
 ];
 
 // Generates a plausible full 12-team season standings table for a given
@@ -917,7 +941,7 @@ function StandingsTable({ title, teams, accentBar, c, rankMap }) {
                 <td className="py-3">
                   <div className="flex items-center gap-2.5">
                     <div className="rounded-full flex items-center justify-center flex-shrink-0" style={{ width: 28, height: 28, backgroundColor: c.panelAlt, border: `1px solid ${c.border}`, fontSize: 10, fontWeight: 700, color: c.subtext }}>
-                      {t.nick.slice(0, 2).toUpperCase()}
+                      {displayName(t.nick).slice(0, 2).toUpperCase()}
                     </div>
                     <div>
                       <div className="font-semibold" style={{ color: c.text }}>{t.team}</div>
@@ -1017,10 +1041,10 @@ function SchedulePage({ c, accent }) {
   const anyRealScores = matchups.some((m) => m.hs !== null);
   const awards = anyRealScores
     ? (() => {
-        const scored = matchups.flatMap((m) => [{ team: m.home, val: m.hs }, { team: m.away, val: m.as }]);
+        const scored = matchups.flatMap((m) => [{ team: displayName(m.home), val: m.hs }, { team: displayName(m.away), val: m.as }]);
         const high = scored.reduce((a, b) => (b.val > a.val ? b : a));
         const low = scored.reduce((a, b) => (b.val < a.val ? b : a));
-        const margins = matchups.map((m) => ({ label: `${m.home} vs ${m.away}`, margin: Math.abs(m.hs - m.as) }));
+        const margins = matchups.map((m) => ({ label: `${displayName(m.home)} vs ${displayName(m.away)}`, margin: Math.abs(m.hs - m.as) }));
         const closest = margins.reduce((a, b) => (b.margin < a.margin ? b : a));
         const blowout = margins.reduce((a, b) => (b.margin > a.margin ? b : a));
         return [
@@ -1056,7 +1080,7 @@ function SchedulePage({ c, accent }) {
         {awards.map((a) => (
           <Panel key={a.label} c={c} style={{ padding: 10 }}>
             <div className="text-[9px] uppercase tracking-wider mb-0.5" style={{ color: c.subtextFaint }}>{a.label}</div>
-            <div className="text-xs font-semibold leading-tight" style={{ color: c.text }}>{a.team}</div>
+            <div className="text-xs font-semibold leading-tight" style={{ color: c.text }}>{expandNames(a.team)}</div>
             <div className="text-[10px]" style={{ fontFamily: MONO, color: c.subtextFaint }}>{a.val}</div>
           </Panel>
         ))}
@@ -1080,14 +1104,14 @@ function SchedulePage({ c, accent }) {
               </div>
               <div className="flex items-center justify-between">
                 <div className="flex-1">
-                  <div className="font-semibold" style={{ color: homeWin || showProjected ? c.text : c.subtext }}>{m.home}</div>
+                  <div className="font-semibold" style={{ color: homeWin || showProjected ? c.text : c.subtext }}>{displayName(m.home)}</div>
                   {showProjected
                     ? <span className="text-xs" style={{ color: c.subtextFaint }}>Proj. {(m.homeProj || 0).toFixed(1)}</span>
                     : <Digits value={m.hs} c={c} />}
                 </div>
                 <div className="text-xs px-3" style={{ fontFamily: MONO, color: c.subtextFaint }}>VS</div>
                 <div className="flex-1 text-right">
-                  <div className="font-semibold" style={{ color: !homeWin || showProjected ? c.text : c.subtext }}>{m.away}</div>
+                  <div className="font-semibold" style={{ color: !homeWin || showProjected ? c.text : c.subtext }}>{displayName(m.away)}</div>
                   {showProjected
                     ? <span className="text-xs" style={{ color: c.subtextFaint }}>Proj. {(m.awayProj || 0).toFixed(1)}</span>
                     : <Digits value={m.as} c={c} />}
@@ -1151,7 +1175,7 @@ function PlacementGameBox({ title, top, bottom, c, x, y, width }) {
 }
 
 function BracketTree({ seeds, byeIds, matchups, roundLabel, roundNames, c }) {
-  const nameOf = (n) => `${seeds[n]?.nick ?? 'TBD'} (${n})`;
+  const nameOf = (n) => `${seeds[n] ? displayName(seeds[n].nick) : 'TBD'} (${n})`;
   const [r1Name, r2Name, r3Name, place3Name, place5Name] = roundNames;
 
   // ---- Round 1 Y positions ----
@@ -1345,7 +1369,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
             return (
               <Panel key={nick} c={c} style={{ padding: 12 }}>
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-sm font-semibold" style={{ color: c.text }}>#{rankMap[nick]} &middot; {nick}</span>
+                  <span className="text-sm font-semibold" style={{ color: c.text }}>#{rankMap[nick]} &middot; {displayName(nick)}</span>
                   <span className="text-sm font-bold" style={{ fontFamily: MONO, color: inPlayoffs ? c.win : c.subtext }}>{odds}%</span>
                 </div>
                 <div className="flex items-center justify-between text-[10px]" style={{ color: c.subtextFaint }}>
@@ -1396,11 +1420,11 @@ function TeamsPage({ c, accent }) {
       <Panel c={c} style={{ padding: 16, marginBottom: 8 }}>
         <div className="flex items-center gap-3 mb-4">
           <div className="rounded-full flex items-center justify-center flex-shrink-0" style={{ width: 56, height: 56, backgroundColor: c.panelAlt, border: `2px solid ${accent}`, fontSize: 16, fontWeight: 700, color: c.text }}>
-            {team.nick.slice(0, 2).toUpperCase()}
+            {displayName(team.nick).slice(0, 2).toUpperCase()}
           </div>
           <div>
             <div className="text-lg font-bold leading-tight" style={{ color: c.text }}>{team.team}</div>
-            <div className="text-xs" style={{ color: c.subtextFaint }}>{team.owner} &middot; "{team.nick}"</div>
+            <div className="text-xs" style={{ color: c.subtextFaint }}>{team.owner}</div>
           </div>
         </div>
         <div className="grid grid-cols-3 gap-3">
@@ -1451,7 +1475,7 @@ function TeamsPage({ c, accent }) {
             <Panel c={c} style={{ overflow: 'hidden' }}>
               {otherTeams.map((t, i) => (
                 <div key={t.nick} className="flex items-center justify-between px-3 py-2" style={{ borderBottom: i < otherTeams.length - 1 ? `1px solid ${c.borderSoft}` : 'none' }}>
-                  <span className="text-xs" style={{ color: c.text }}>{t.nick}</span>
+                  <span className="text-xs" style={{ color: c.text }}>{displayName(t.nick)}</span>
                   <span className="text-xs" style={{ fontFamily: MONO, color: c.subtextFaint }}>{2 + (i % 3)}-{1 + (i % 2)}</span>
                 </div>
               ))}
@@ -1476,11 +1500,11 @@ function scheduleSwapResult(teamNick, otherNick) {
 
   let blurb;
   if (winDelta > 0) {
-    blurb = `${other.nick}'s schedule was noticeably softer, especially in the middle stretch of the season.`;
+    blurb = `${displayName(other.nick)}'s schedule was noticeably softer, especially in the middle stretch of the season.`;
   } else if (winDelta < 0) {
-    blurb = `${other.nick}'s schedule was actually tougher than it looked \u2014 more games against the league's stronger teams.`;
+    blurb = `${displayName(other.nick)}'s schedule was actually tougher than it looked \u2014 more games against the league's stronger teams.`;
   } else {
-    blurb = `Surprisingly close to a wash \u2014 ${other.nick}'s schedule was roughly the same difficulty, just with the tough matchups landing in different weeks.`;
+    blurb = `Surprisingly close to a wash \u2014 ${displayName(other.nick)}'s schedule was roughly the same difficulty, just with the tough matchups landing in different weeks.`;
   }
 
   return { actualRecord: `${team.w}-${team.l}`, newRecord: `${newW}-${newL}`, delta: winDelta, blurb };
@@ -1578,7 +1602,7 @@ function WhatIfSimulatorPage({ c, accent }) {
               {sorted.map((t) => (
                 <tr key={t.nick} style={{ borderBottom: `1px solid ${c.borderSoft}` }}>
                   <td className="py-2 pl-3" style={{ fontFamily: MONO, color: c.subtextFaint }}>{rankMap[t.nick]}</td>
-                  <td className="py-2 font-semibold" style={{ color: c.text }}>{t.nick}</td>
+                  <td className="py-2 font-semibold" style={{ color: c.text }}>{displayName(t.nick)}</td>
                   <td className="py-2 text-center" style={{ fontFamily: MONO, color: accent }}>{t.w}-{t.l}</td>
                   <td className="py-2 pr-3 text-center" style={{ fontFamily: MONO, color: c.subtextFaint }}>{t.divW}-{t.divL}</td>
                 </tr>
@@ -1642,7 +1666,7 @@ function WhatIfSimulatorPage({ c, accent }) {
               <div className="text-xl font-bold" style={{ fontFamily: MONO, color: c.text }}>{result.actualRecord}</div>
             </div>
             <div>
-              <div className="text-[9px] uppercase tracking-wider" style={{ color: c.subtextFaint }}>With {other} Schedule</div>
+              <div className="text-[9px] uppercase tracking-wider" style={{ color: c.subtextFaint }}>With {displayName(other)} Schedule</div>
               <div className="text-xl font-bold" style={{ fontFamily: MONO, color: result.delta > 0 ? c.win : result.delta < 0 ? c.loss : accent }}>{result.newRecord}</div>
             </div>
           </div>
@@ -1713,7 +1737,7 @@ function TrophyRoomPage({ c, accent }) {
             <tbody>
               {leaderboard.map(([nick, ct], i) => (
                 <tr key={nick} style={{ borderBottom: i < leaderboard.length - 1 ? `1px solid ${c.borderSoft}` : 'none' }}>
-                  <td className="py-2.5 pl-3 font-semibold" style={{ color: c.text }}>{nick}</td>
+                  <td className="py-2.5 pl-3 font-semibold" style={{ color: c.text }}>{displayName(nick)}</td>
                   <td className="py-2.5 text-center"><IconCount icon={Trophy} count={ct.first} color={GOLD} /></td>
                   <td className="py-2.5 text-center"><IconCount icon={Trophy} count={ct.second} color={SILVER} /></td>
                   <td className="py-2.5 text-center"><IconCount icon={Trophy} count={ct.third} color={BRONZE} /></td>
@@ -1735,12 +1759,12 @@ function TrophyRoomPage({ c, accent }) {
               <span className="text-base font-bold" style={{ color: c.text }}>{ch.year}</span>
             </div>
             <div className="grid grid-cols-2 gap-y-2 gap-x-3 text-xs">
-              <div><span style={{ color: c.subtextFaint }}>Winner: </span><span style={{ color: c.win, fontWeight: 700 }}>{ch.champion}</span></div>
-              <div><span style={{ color: c.subtextFaint }}>Finalist: </span><span style={{ color: c.text, fontWeight: 600 }}>{ch.runnerUp}</span></div>
-              <div><span style={{ color: c.subtextFaint }}>3rd Place: </span><span style={{ color: c.text }}>{ch.third}</span></div>
-              <div><span style={{ color: c.subtextFaint }}>Most Points: </span><span style={{ color: c.text }}>{ch.mostPF}</span></div>
-              <div><span style={{ color: c.subtextFaint }}>Bad Little Boys Winner: </span><span style={{ color: c.text }}>{ch.badDivWinner}</span></div>
-              <div><span style={{ color: c.subtextFaint }}>Good Little Boys Winner: </span><span style={{ color: c.text }}>{ch.goodDivWinner}</span></div>
+              <div><span style={{ color: c.subtextFaint }}>Winner: </span><span style={{ color: c.win, fontWeight: 700 }}>{displayName(ch.champion)}</span></div>
+              <div><span style={{ color: c.subtextFaint }}>Finalist: </span><span style={{ color: c.text, fontWeight: 600 }}>{displayName(ch.runnerUp)}</span></div>
+              <div><span style={{ color: c.subtextFaint }}>3rd Place: </span><span style={{ color: c.text }}>{displayName(ch.third)}</span></div>
+              <div><span style={{ color: c.subtextFaint }}>Most Points: </span><span style={{ color: c.text }}>{displayName(ch.mostPF)}</span></div>
+              <div><span style={{ color: c.subtextFaint }}>Bad Little Boys Winner: </span><span style={{ color: c.text }}>{displayName(ch.badDivWinner)}</span></div>
+              <div><span style={{ color: c.subtextFaint }}>Good Little Boys Winner: </span><span style={{ color: c.text }}>{displayName(ch.goodDivWinner)}</span></div>
             </div>
           </Panel>
         ))}
@@ -1869,7 +1893,7 @@ function ChampionYearCard({ ch, c, accent }) {
           {rows.map((s, i) => (
             <tr key={s.nick} style={{ borderTop: `1px solid ${c.borderSoft}` }}>
               <td className="py-1.5" style={{ fontFamily: MONO, color: c.subtextFaint }}>{i + 1}</td>
-              <td className="py-1.5" style={{ color: c.text }}>{s.nick}</td>
+              <td className="py-1.5" style={{ color: c.text }}>{displayName(s.nick)}</td>
               <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.w}-{s.l}</td>
               <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.divW}-{s.divL}</td>
               <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: accent }}>{s.pf}</td>
@@ -1889,14 +1913,14 @@ function ChampionYearCard({ ch, c, accent }) {
           <span className="text-xs" style={{ color: accent }}>{open ? 'Hide standings ↑' : 'Full Regular Season Standings ↓'}</span>
         </div>
         <div className="grid grid-cols-2 gap-2 text-xs">
-          <div><span style={{ color: c.subtextFaint }}>Champion: </span><span style={{ color: c.win, fontWeight: 600 }}>{ch.champion}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>Runner-Up: </span><span style={{ color: c.text }}>{ch.runnerUp}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>3rd Place: </span><span style={{ color: c.text }}>{ch.third}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>Last Place: </span><span style={{ color: c.loss }}>{ch.lastPlace}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>Toilet Bowl W: </span><span style={{ color: c.text }}>{ch.toiletBowlWinner}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>Toilet Bowl L: </span><span style={{ color: c.loss }}>{ch.toiletBowlLoser}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>Most PF: </span><span style={{ color: c.text }}>{ch.mostPF}</span></div>
-          <div><span style={{ color: c.subtextFaint }}>Most PA: </span><span style={{ color: c.text }}>{ch.mostPA}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Champion: </span><span style={{ color: c.win, fontWeight: 600 }}>{displayName(ch.champion)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Runner-Up: </span><span style={{ color: c.text }}>{displayName(ch.runnerUp)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>3rd Place: </span><span style={{ color: c.text }}>{displayName(ch.third)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Last Place: </span><span style={{ color: c.loss }}>{displayName(ch.lastPlace)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Toilet Bowl W: </span><span style={{ color: c.text }}>{displayName(ch.toiletBowlWinner)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Toilet Bowl L: </span><span style={{ color: c.loss }}>{displayName(ch.toiletBowlLoser)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Most PF: </span><span style={{ color: c.text }}>{displayName(ch.mostPF)}</span></div>
+          <div><span style={{ color: c.subtextFaint }}>Most PA: </span><span style={{ color: c.text }}>{displayName(ch.mostPA)}</span></div>
         </div>
       </button>
 
@@ -1952,7 +1976,7 @@ function RecordBookPage({ c, accent }) {
                       <div className="text-xs" style={{ color: c.subtextFaint }}>{r.label}</div>
                       {r.holders.map((h, hi) => (
                         <div key={hi} className="text-sm font-semibold" style={{ color: c.text }}>
-                          {h.name}{h.context && <span className="font-normal text-xs ml-1.5" style={{ color: c.subtextFaint }}>({h.context})</span>}
+                          {expandNames(h.name)}{h.context && <span className="font-normal text-xs ml-1.5" style={{ color: c.subtextFaint }}>({h.context})</span>}
                         </div>
                       ))}
                       {r.holders.length > 1 && <div className="text-[9px] uppercase mt-0.5" style={{ color: accent }}>Tied</div>}
@@ -1992,12 +2016,12 @@ function PowerRankingsPage({ c, accent }) {
       <div className="grid grid-cols-2 gap-2 mb-4">
         <Panel c={c} style={{ padding: 12, borderColor: c.win }}>
           <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.win }}>Biggest Riser</div>
-          <div className="text-sm font-bold" style={{ color: c.text }}>{riser.nick}</div>
+          <div className="text-sm font-bold" style={{ color: c.text }}>{displayName(riser.nick)}</div>
           <div className="text-xs" style={{ fontFamily: MONO, color: c.win }}>+{riser.delta} spots</div>
         </Panel>
         <Panel c={c} style={{ padding: 12, borderColor: c.loss }}>
           <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.loss }}>Biggest Faller</div>
-          <div className="text-sm font-bold" style={{ color: c.text }}>{faller.nick}</div>
+          <div className="text-sm font-bold" style={{ color: c.text }}>{displayName(faller.nick)}</div>
           <div className="text-xs" style={{ fontFamily: MONO, color: c.loss }}>{faller.delta} spots</div>
         </Panel>
       </div>
@@ -2018,7 +2042,7 @@ function PowerRankingsPage({ c, accent }) {
           {chartTeams.map((t, i) => (
             <div key={t} className="flex items-center gap-1">
               <div style={{ width: 8, height: 8, borderRadius: 2, backgroundColor: POWER_CHART_COLORS[i] }} />
-              <span className="text-[10px]" style={{ color: c.subtext }}>{t}</span>
+              <span className="text-[10px]" style={{ color: c.subtext }}>{displayName(t)}</span>
             </div>
           ))}
         </div>
@@ -2028,7 +2052,7 @@ function PowerRankingsPage({ c, accent }) {
         {withDelta.map((r) => (
           <Panel key={r.nick} c={c} style={{ padding: 12 }}>
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-sm font-semibold" style={{ color: c.text }}>#{r.rank} &middot; {r.nick}</span>
+              <span className="text-sm font-semibold" style={{ color: c.text }}>#{r.rank} &middot; {displayName(r.nick)}</span>
               {r.delta !== 0 && (
                 <span className="text-xs font-semibold" style={{ fontFamily: MONO, color: r.delta > 0 ? c.win : c.loss }}>
                   {r.delta > 0 ? '↑' : '↓'} {Math.abs(r.delta)}
@@ -2069,11 +2093,11 @@ function MoveCard({ m, c, accent }) {
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <div className="text-xs font-semibold mb-1" style={{ color: c.text }}>{m.teamA} gets</div>
+            <div className="text-xs font-semibold mb-1" style={{ color: c.text }}>{displayName(m.teamA)} gets</div>
             {m.teamAGets.map((p) => <div key={p} className="text-xs" style={{ color: c.subtext }}>{p}</div>)}
           </div>
           <div>
-            <div className="text-xs font-semibold mb-1" style={{ color: c.text }}>{m.teamB} gets</div>
+            <div className="text-xs font-semibold mb-1" style={{ color: c.text }}>{displayName(m.teamB)} gets</div>
             {m.teamBGets.map((p) => <div key={p} className="text-xs" style={{ color: c.subtext }}>{p}</div>)}
           </div>
         </div>
@@ -2094,7 +2118,7 @@ function MoveCard({ m, c, accent }) {
         <div className="space-y-1 mt-2">
           {m.bids.map((b) => (
             <div key={b.team} className="flex items-center justify-between text-xs px-2 py-1 rounded" style={{ backgroundColor: b.won ? c.panelAlt : 'transparent' }}>
-              <span style={{ color: b.won ? c.text : c.subtext, fontWeight: b.won ? 600 : 400 }}>{b.team}{b.won && ' \u2713'}</span>
+              <span style={{ color: b.won ? c.text : c.subtext, fontWeight: b.won ? 600 : 400 }}>{displayName(b.team)}{b.won && ' \u2713'}</span>
               <span style={{ fontFamily: MONO, color: b.won ? accent : c.subtextFaint }}>${b.amount}</span>
             </div>
           ))}
@@ -2110,7 +2134,7 @@ function MoveCard({ m, c, accent }) {
         <span className="text-xs font-semibold" style={{ color: accent }}>Add/Drop</span>
         <span className="text-[10px]" style={{ color: c.subtextFaint }}>{m.date}</span>
       </div>
-      <div className="text-sm font-medium" style={{ color: c.text }}>{m.team}</div>
+      <div className="text-sm font-medium" style={{ color: c.text }}>{displayName(m.team)}</div>
       <div className="text-xs" style={{ color: c.subtext }}>
         {m.added && <>Added {m.added}</>}{m.added && m.dropped && <> &mdash; </>}{m.dropped && <>Dropped {m.dropped}</>}
       </div>
@@ -2152,7 +2176,7 @@ function MovesPage({ c, accent }) {
       </div>
       <div className="flex gap-2 mb-4">
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} className="flex-1 text-xs rounded-md px-2 py-2 border" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
-          {teams.map((t) => <option key={t} value={t}>{t === 'all' ? 'All Teams' : t}</option>)}
+          {teams.map((t) => <option key={t} value={t}>{t === 'all' ? 'All Teams' : displayName(t)}</option>)}
         </select>
         <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="flex-1 text-xs rounded-md px-2 py-2 border" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
           {types.map((t) => <option key={t} value={t}>{t === 'all' ? 'All Types' : t}</option>)}
