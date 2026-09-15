@@ -459,7 +459,10 @@ function parseSeasonStandingsGeneric(json) {
       if ((meta.name || '').includes('Gojo')) nick = 'Zai';
       else { nick = ryanSeen === 0 ? 'Zai' : 'Twizzy'; ryanSeen++; }
     }
-    if (!nick) return;
+    // Never drop a real team just because we can't map them to our known
+    // 12 \u2014 fall back to whatever real identifier Yahoo gives us (a
+    // former/one-off manager from an older season, for example).
+    if (!nick) nick = managerNick || meta.name || 'Unknown';
 
     rows.push({
       nick,
