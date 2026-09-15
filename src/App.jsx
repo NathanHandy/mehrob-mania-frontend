@@ -17,7 +17,7 @@ const YAHOO_TEAM_ID_TO_NICK = {
 };
 const YAHOO_DIVISION_ID_TO_NAME = { 1: 'Bad Little Boys', 2: 'Mid Little Boys', 3: 'Good Little Boys' };
 
-// Real first names for display, everywhere \u2014 internal nick codes (NJ,
+// Real first names for display, everywhere — internal nick codes (NJ,
 // RB, Okarp, etc.) stay as the technical identifier for keys/lookups only
 // and should never be shown to the user directly. The two Ryans are
 // disambiguated as "Ryan B" and "Ryan A" per Nathan's preference.
@@ -30,7 +30,7 @@ function displayName(nick) {
   return NICK_TO_FIRST_NAME[nick] || nick;
 }
 // For strings that embed a nick inside longer text (e.g. "NJ vs. Bodge",
-// "Gill vs. RB, Wk 5") \u2014 replaces every whole-word nick match with the
+// "Gill vs. RB, Wk 5") — replaces every whole-word nick match with the
 // real first name.
 function expandNames(text) {
   if (!text) return text;
@@ -68,10 +68,14 @@ function parseYahooStandings(json) {
     const divName = YAHOO_DIVISION_ID_TO_NAME[meta.division_id];
     if (!nick || !divName) return;
 
+    const rawPhoto = meta.managers?.[0]?.manager?.image_url;
+    const photoUrl = rawPhoto && !rawPhoto.includes('default_user_profile_pic') ? rawPhoto : null;
+
     byDivision[divName].push({
       nick,
       team: meta.name,
-      owner: meta.managers?.[0]?.manager?.nickname || nick,
+      owner: (meta.managers?.[0]?.manager?.nickname === '--hidden--' ? null : meta.managers?.[0]?.manager?.nickname) || displayName(nick),
+      photoUrl,
       w: Number(outcomes.wins) || 0,
       l: Number(outcomes.losses) || 0,
       pf: Number(standings.points_for) || 0,
@@ -159,7 +163,13 @@ function useLiveDraft() {
   return { data, loading, error };
 }
 
-function parseYahooTransactions(json) {
+function nickFromTeamKey(teamKey) {
+  if (!teamKey) return null;
+  const match = teamKey.match(/\.t\.(\d+)$/);
+  return match ? YAHOO_TEAM_ID_TO_NICK[Number(match[1])] : null;
+}
+
+function parseYahooTransactions(json, year = 2026) {
   const txObj = json?.fantasy_content?.league?.[1]?.transactions;
   if (!txObj) return null;
 
@@ -182,25 +192,25 @@ function parseYahooTransactions(json) {
       playerEntries.push({
         name: pMeta.name?.full,
         txType: txData.type,
-        destTeam: txData.destination_team_name,
-        sourceTeam: txData.source_team_name,
+        destTeam: nickFromTeamKey(txData.destination_team_key) || txData.destination_team_name,
+        sourceTeam: nickFromTeamKey(txData.source_team_key) || txData.source_team_name,
       });
     });
 
     const date = new Date(Number(meta.timestamp) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
     if (meta.type === 'trade') {
-      const teamA = meta.trader_team_name;
-      const teamB = meta.tradee_team_name;
+      const teamA = nickFromTeamKey(meta.trader_team_key) || meta.trader_team_name;
+      const teamB = nickFromTeamKey(meta.tradee_team_key) || meta.tradee_team_name;
       const teamAGets = playerEntries.filter((p) => p.destTeam === teamA).map((p) => p.name);
       const teamBGets = playerEntries.filter((p) => p.destTeam === teamB).map((p) => p.name);
-      moves.push({ date, year: 2026, type: 'Trade', teamA, teamAGets, teamB, teamBGets });
+      moves.push({ date, year, type: 'Trade', teamA, teamAGets, teamB, teamBGets });
     } else {
       const addedEntry = playerEntries.find((p) => p.txType === 'add');
       const droppedEntry = playerEntries.find((p) => p.txType === 'drop');
       const team = addedEntry?.destTeam || droppedEntry?.sourceTeam;
       if (!team) return;
-      moves.push({ date, year: 2026, type: 'Add/Drop', team, added: addedEntry?.name || null, dropped: droppedEntry?.name || null });
+      moves.push({ date, year, type: 'Add/Drop', team, added: addedEntry?.name || null, dropped: droppedEntry?.name || null });
     }
   });
   return moves;
@@ -295,7 +305,7 @@ function useLiveSchedule(week) {
 }
 
 // --- Playoff odds via Monte Carlo simulation ---
-// Based purely on real record and the real remaining schedule \u2014 no
+// Based purely on real record and the real remaining schedule — no
 // projected/pre-season strength assumptions. Before any games are played
 // every team is a true coin flip; the simulation still produces real
 // variance in each team's odds because it runs the actual remaining
@@ -327,7 +337,7 @@ function computePlayoffOdds(liveData, remainingWeeksMatchups, divOrder, restOrde
       week.forEach(([a, b]) => {
         if (!sim[a] || !sim[b]) return;
         const pa = power[a] ?? 0.5, pb = power[b] ?? 0.5;
-        const prob = 1 / (1 + Math.pow(10, -(pa - pb) * 0.6)); // calibrated so a big real record gap (e.g. 0.8 vs 0.3 win%) lands around a 65-68% favorite, not a near-lock \u2014 fantasy football has real week-to-week variance
+        const prob = 1 / (1 + Math.pow(10, -(pa - pb) * 0.6)); // calibrated so a big real record gap (e.g. 0.8 vs 0.3 win%) lands around a 65-68% favorite, not a near-lock — fantasy football has real week-to-week variance
         const aWins = Math.random() < prob;
         if (aWins) { sim[a].w++; sim[b].l++; } else { sim[b].w++; sim[a].l++; }
         if (divNameOf[a] === divNameOf[b]) {
@@ -450,7 +460,8 @@ function parseSeasonStandingsGeneric(json) {
     const standings = teamArr[2]?.team_standings || {};
     const outcomes = standings.outcome_totals || {};
     const divOutcomes = standings.divisional_outcome_totals || {};
-    const managerNick = meta.managers?.[0]?.manager?.nickname;
+    let managerNick = meta.managers?.[0]?.manager?.nickname;
+    if (managerNick === '--hidden--') managerNick = null; // Yahoo's placeholder for a privacy-hidden nickname — fall through to team name instead
 
     let nick = MANAGER_NICKNAME_TO_NICK[managerNick];
     if (!nick && managerNick === 'Ryan') {
@@ -460,7 +471,7 @@ function parseSeasonStandingsGeneric(json) {
       else { nick = ryanSeen === 0 ? 'Zai' : 'Twizzy'; ryanSeen++; }
     }
     // Never drop a real team just because we can't map them to our known
-    // 12 \u2014 fall back to whatever real identifier Yahoo gives us (a
+    // 12 — fall back to whatever real identifier Yahoo gives us (a
     // former/one-off manager from an older season, for example).
     if (!nick) nick = managerNick || meta.name || 'Unknown';
 
@@ -473,16 +484,31 @@ function parseSeasonStandingsGeneric(json) {
       pa: Number(standings.points_against) || 0,
       divW: Number(divOutcomes.wins) || 0,
       divL: Number(divOutcomes.losses) || 0,
-      rank: Number(standings.rank) || 99,
+      finalRank: Number(standings.rank) || 99, // real final placement (after playoffs) — used only for medals, not sort order
+      playoffSeed: Number(standings.playoff_seed) || null, // Yahoo's own real seed heading into week 1 of playoffs, using that season's actual tiebreaker rules
       divisionId: meta.division_id,
     });
   });
-  rows.sort((a, b) => a.rank - b.rank);
+  // Sort by Yahoo's real playoff seed — this already reflects whatever
+  // tiebreaker rules actually applied that season, so we don't have to
+  // guess. Falls back to a computed win%/PF sort only if a seed is
+  // somehow missing.
+  rows.sort((a, b) => {
+    if (a.playoffSeed && b.playoffSeed) return a.playoffSeed - b.playoffSeed;
+    if (a.playoffSeed) return -1;
+    if (b.playoffSeed) return 1;
+    const wpA = a.w / ((a.w + a.l) || 1);
+    const wpB = b.w / ((b.w + b.l) || 1);
+    if (wpB !== wpA) return wpB - wpA;
+    return b.pf - a.pf;
+  });
   return rows;
 }
 
 function useSeasonDetail(year) {
   const [rows, setRows] = useState(null);
+  const [draftByNick, setDraftByNick] = useState(null);
+  const [moves, setMoves] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -505,12 +531,14 @@ function useSeasonDetail(year) {
         const parsed = parseSeasonStandingsGeneric(json.standings);
         if (!parsed) throw new Error('Unexpected response shape');
         setRows(parsed);
+        if (json.draft) setDraftByNick(parseYahooDraft(json.draft));
+        if (json.transactions) setMoves(parseYahooTransactions(json.transactions, Number(year)));
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [year]);
 
-  return { rows, loading, error };
+  return { rows, draftByNick, moves, loading, error };
 }
 
 
@@ -1037,8 +1065,8 @@ function StandingsTable({ title, teams, accentBar, c, rankMap }) {
                 <td className="py-3 pl-4" style={{ fontFamily: MONO, color: c.subtext }}>{rankMap[t.nick]}</td>
                 <td className="py-3">
                   <div className="flex items-center gap-2.5">
-                    <div className="rounded-full flex items-center justify-center flex-shrink-0" style={{ width: 28, height: 28, backgroundColor: c.panelAlt, border: `1px solid ${c.border}`, fontSize: 10, fontWeight: 700, color: c.subtext }}>
-                      {displayName(t.nick).slice(0, 2).toUpperCase()}
+                    <div className="rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden" style={{ width: 28, height: 28, backgroundColor: c.panelAlt, border: `1px solid ${c.border}`, fontSize: 10, fontWeight: 700, color: c.subtext }}>
+                      {t.photoUrl ? <img src={t.photoUrl} alt={displayName(t.nick)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : displayName(t.nick).slice(0, 2).toUpperCase()}
                     </div>
                     <div>
                       <div className="font-semibold" style={{ color: c.text }}>{t.team}</div>
@@ -1115,7 +1143,7 @@ function StandingsPage({ c, accent, divOrder, setDivOrder, restOrder, setRestOrd
     <div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
         {loading && 'Loading live standings from Yahoo…'}
-        {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
+        {!loading && error && `Couldn't load live data (${error}) — showing sample data instead.`}
         {!loading && !error && 'Live from Yahoo.'} Seed reflects overall standing across all 12 teams: the 2 best division winners hold seeds 1-2 (byes), everyone else &mdash; including the 3rd division winner &mdash; is seeded 3-12 by record regardless of division. Tiebreakers only apply when W-L records are actually tied.
       </div>
       <TiebreakerPicker order={divOrder} setOrder={setDivOrder} c={c} label="Division Winner Tiebreakers" />
@@ -1169,7 +1197,7 @@ function SchedulePage({ c, accent }) {
 
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
         {loading && 'Loading live matchups from Yahoo…'}
-        {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
+        {!loading && error && `Couldn't load live data (${error}) — showing sample data instead.`}
         {!loading && !error && 'Live from Yahoo.'}
       </div>
 
@@ -1411,7 +1439,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
       <SectionHeader title="Playoff Picture" c={c} accent={accent} />
       <div className="mb-4 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
         {loading && 'Loading live standings from Yahoo…'}
-        {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
+        {!loading && error && `Couldn't load live data (${error}) — showing sample data instead.`}
         {!loading && !error && 'Built live from current Yahoo standings.'} Not official until playoffs actually begin (weeks 15&ndash;17). The bracket reseeds after every round: the highest remaining seed always plays the lowest remaining seed, comparing both winners against each other &mdash; so the #1 seed could face the winner of either Round 1 match, not just the one drawn next to it.
       </div>
 
@@ -1448,7 +1476,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
       <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(simulated from real record, tiebreakers &amp; remaining schedule)</span></div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
         {oddsLoading && 'Running the simulation against the real remaining schedule…'}
-        {!oddsLoading && oddsResult && 'Recalculated weekly \u2014 based purely on real record, real tiebreakers, and the real remaining schedule. Simulates the rest of the season thousands of times to estimate each team\u2019s odds; pre-season, that means everyone starts as a true coin flip, with variance coming only from schedule structure and tiebreaker mechanics.'}
+        {!oddsLoading && oddsResult && 'Recalculated weekly — based purely on real record, real tiebreakers, and the real remaining schedule. Simulates the rest of the season thousands of times to estimate each team’s odds; pre-season, that means everyone starts as a true coin flip, with variance coming only from schedule structure and tiebreaker mechanics.'}
       </div>
       <div className="space-y-2">
         {allTeams
@@ -1470,7 +1498,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
                   <span className="text-sm font-bold" style={{ fontFamily: MONO, color: inPlayoffs ? c.win : c.subtext }}>{odds}%</span>
                 </div>
                 <div className="flex items-center justify-between text-[10px]" style={{ color: c.subtextFaint }}>
-                  <span>SOS remaining: {sos !== null ? sos : '\u2014'}</span>
+                  <span>SOS remaining: {sos !== null ? sos : '—'}</span>
                   {gb > 0 && <span>{gb} GB</span>}
                 </div>
               </Panel>
@@ -1485,16 +1513,16 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
 // Mock "getting to know the guys" bio info — will be editable per-owner later.
 const TEAM_BIOS = {
   NJ: { desc: 'Founder of the league and commissioner since its inception. Strong advocate for traditional fantasy football theories and rules. Fantasy football means enough to him that it’s on his resume.', location: 'Lunenburg, MA', accomplishments: 'Made the finals twice (hasn’t won yet); 10+ years of fantasy experience', blunders: 'Known in the league as a "boring" player who often rosters old/ugly fantasy players' },
-  Skeo: { desc: 'Played fantasy briefly when younger, quit; a short 2022 comeback ended in a near-last-place finish. Extremely competitive, takes losses personally.', location: 'Sandwich, MA', accomplishments: 'Won the championship in his first season back as an expansion team', blunders: 'League rumors say his brother was the mastermind behind that title roster \u2014 he pushes back on it every time' },
+  Skeo: { desc: 'Played fantasy briefly when younger, quit; a short 2022 comeback ended in a near-last-place finish. Extremely competitive, takes losses personally.', location: 'Sandwich, MA', accomplishments: 'Won the championship in his first season back as an expansion team', blunders: 'League rumors say his brother was the mastermind behind that title roster — he pushes back on it every time' },
   Rooby: { desc: 'Chaotic and a frequent trader, occasionally lucky but often self-sabotaging. The league is literally named after him.', location: 'Erie, PA', accomplishments: 'Runs a sports podcast/TikTok page', blunders: 'Once spent $99 FAAB on a player who got dropped weeks later; famously fell asleep on draft day' },
-  Okarp: { desc: 'Former high school lineman with real football knowledge and a love of beer. Doesn’t look at fantasy until the day before the draft \u2014 still fields a decent squad every year.', location: 'New York, NY', accomplishments: 'Won the league in 2022', blunders: 'Known in the league for a running joke about his morning bathroom habits' },
-  RB: { desc: 'Passionate about gambling and soccer. An AI enthusiast who loves making photos of friends and surroundings. Sales is his passion \u2014 it shows in trade talks.', location: 'Medford, MA', accomplishments: 'Won the 2023 championship', blunders: 'Finished dead last as a rookie in 2022' },
+  Okarp: { desc: 'Former high school lineman with real football knowledge and a love of beer. Doesn’t look at fantasy until the day before the draft — still fields a decent squad every year.', location: 'New York, NY', accomplishments: 'Won the league in 2022', blunders: 'Known in the league for a running joke about his morning bathroom habits' },
+  RB: { desc: 'Passionate about gambling and soccer. An AI enthusiast who loves making photos of friends and surroundings. Sales is his passion — it shows in trade talks.', location: 'Medford, MA', accomplishments: 'Won the 2023 championship', blunders: 'Finished dead last as a rookie in 2022' },
   Bronnie: { desc: 'Laid-back, sloth-like personality with solid football knowledge. Rookie-obsessed. Tends to go quiet with the league until it’s actually time to play.', location: 'Trumbull, CT', accomplishments: 'Still chasing his first championship', blunders: 'Famously skipped the 2025 draft for a bocce tournament' },
   Mr: { desc: 'Pronounced "Mur." Least opinionated league member; mainly dislikes losing his entry money. Would rather relax on the couch Sundays with beer and Popeyes than obsess over fantasy.', location: 'Lunenburg, MA', accomplishments: 'Joined the league in 2025', blunders: 'Often looked down on / taken advantage of in trades by cheekier managers' },
-  Zai: { desc: 'Extremely obsessed with fantasy \u2014 a FantasyPros subscriber who won’t accept trades unless clearly winning. Winter hobbies: Rainbow Six Siege and crafting unfair trade proposals.', location: 'Lunenburg, MA', accomplishments: 'First-time co-commissioner in 2026', blunders: 'Has a running (dubious) claim that Nathan altered his lineup, costing him a semifinal' },
+  Zai: { desc: 'Extremely obsessed with fantasy — a FantasyPros subscriber who won’t accept trades unless clearly winning. Winter hobbies: Rainbow Six Siege and crafting unfair trade proposals.', location: 'Lunenburg, MA', accomplishments: 'First-time co-commissioner in 2026', blunders: 'Has a running (dubious) claim that Nathan altered his lineup, costing him a semifinal' },
   'Glo pup': { desc: 'Most opinionated manager in the league. Real football knowledge and does real research. Strong supporter of median scoring and reducing luck.', location: 'Auburn, MA', accomplishments: 'Always executes a solid draft, despite being fully technology-challenged', blunders: 'If he loses, his instinct is that the rules need to change' },
-  Gill: { desc: 'Experienced manager with strong football knowledge, very opinionated and strong-willed. Generally impartial but has strong opinions on a few select topics.', location: 'Auburn, MA', accomplishments: '2024 champion', blunders: 'Often either the best team or the worst team in the league \u2014 no in-between' },
-  Twizzy: { desc: 'Ex-army photographer, now spends a lot of time scrolling reels. Drafts and trades players based on jersey color and perceived "aura"/drip status.', location: 'Nashua, NH', accomplishments: 'Loves Rocket League; the only movies that make him cry are Bollywood movies', blunders: 'Often ends up with injured players \u2014 unclear if it’s bad luck or bad drafting' },
+  Gill: { desc: 'Experienced manager with strong football knowledge, very opinionated and strong-willed. Generally impartial but has strong opinions on a few select topics.', location: 'Auburn, MA', accomplishments: '2024 champion', blunders: 'Often either the best team or the worst team in the league — no in-between' },
+  Twizzy: { desc: 'Ex-army photographer, now spends a lot of time scrolling reels. Drafts and trades players based on jersey color and perceived "aura"/drip status.', location: 'Nashua, NH', accomplishments: 'Loves Rocket League; the only movies that make him cry are Bollywood movies', blunders: 'Often ends up with injured players — unclear if it’s bad luck or bad drafting' },
   Bodge: { desc: 'Strong football knowledge and a chill personality when sober. Longtime player and a big sports gambler. Loves George Pickens and other hype-beast type players.', location: 'Boston, MA', accomplishments: 'Won the league during his freshman year of college; hosts the league’s in-person offline drafts', blunders: 'Whether hosting the draft is actually a good idea remains a running debate' },
 };
 
@@ -1504,8 +1532,13 @@ function TeamsPage({ c, accent }) {
   const team = allTeams.find((t) => t.nick === selected);
   const bio = TEAM_BIOS[selected];
   const [expanded, setExpanded] = useState(false);
+  const { data: liveStandings } = useLiveStandings();
 
   const otherTeams = allTeams.filter((t) => t.nick !== selected);
+  const livePhoto = liveStandings
+    ? [...(liveStandings['Bad Little Boys'] || []), ...(liveStandings['Mid Little Boys'] || []), ...(liveStandings['Good Little Boys'] || [])]
+        .find((t) => t.nick === selected)?.photoUrl
+    : null;
 
   return (
     <div>
@@ -1516,8 +1549,8 @@ function TeamsPage({ c, accent }) {
 
       <Panel c={c} style={{ padding: 16, marginBottom: 8 }}>
         <div className="flex items-center gap-3 mb-4">
-          <div className="rounded-full flex items-center justify-center flex-shrink-0" style={{ width: 56, height: 56, backgroundColor: c.panelAlt, border: `2px solid ${accent}`, fontSize: 16, fontWeight: 700, color: c.text }}>
-            {displayName(team.nick).slice(0, 2).toUpperCase()}
+          <div className="rounded-full flex items-center justify-center flex-shrink-0 overflow-hidden" style={{ width: 56, height: 56, backgroundColor: c.panelAlt, border: `2px solid ${accent}`, fontSize: 16, fontWeight: 700, color: c.text }}>
+            {livePhoto ? <img src={livePhoto} alt={displayName(team.nick)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : displayName(team.nick).slice(0, 2).toUpperCase()}
           </div>
           <div>
             <div className="text-lg font-bold leading-tight" style={{ color: c.text }}>{team.team}</div>
@@ -1599,9 +1632,9 @@ function scheduleSwapResult(teamNick, otherNick) {
   if (winDelta > 0) {
     blurb = `${displayName(other.nick)}'s schedule was noticeably softer, especially in the middle stretch of the season.`;
   } else if (winDelta < 0) {
-    blurb = `${displayName(other.nick)}'s schedule was actually tougher than it looked \u2014 more games against the league's stronger teams.`;
+    blurb = `${displayName(other.nick)}'s schedule was actually tougher than it looked — more games against the league's stronger teams.`;
   } else {
-    blurb = `Surprisingly close to a wash \u2014 ${displayName(other.nick)}'s schedule was roughly the same difficulty, just with the tough matchups landing in different weeks.`;
+    blurb = `Surprisingly close to a wash — ${displayName(other.nick)}'s schedule was roughly the same difficulty, just with the tough matchups landing in different weeks.`;
   }
 
   return { actualRecord: `${team.w}-${team.l}`, newRecord: `${newW}-${newL}`, delta: winDelta, blurb };
@@ -1909,15 +1942,22 @@ function draftGrades(nick) {
 function DraftPage({ c, accent }) {
   const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
   const [selected, setSelected] = useState(allTeams[0].nick);
+  const [year, setYear] = useState(2026);
   const team = allTeams.find((t) => t.nick === selected);
+  const isHistorical = year !== 2026;
 
-  const { data: liveDraft, loading: draftLoading, error: draftError } = useLiveDraft();
+  const { data: liveDraft, loading: liveDraftLoading, error: liveDraftError } = useLiveDraft();
   const { data: liveStandings } = useLiveStandings();
+  const { draftByNick: histDraft, loading: histLoading, error: histError } = useSeasonDetail(isHistorical ? year : null);
 
-  const livePicks = liveDraft ? liveDraft[selected] : null;
+  const draftLoading = isHistorical ? histLoading : liveDraftLoading;
+  const draftError = isHistorical ? histError : liveDraftError;
+  const activeDraft = isHistorical ? histDraft : liveDraft;
+
+  const livePicks = activeDraft ? activeDraft[selected] : null;
   const picks = livePicks || generateDraftClass(selected);
 
-  const liveGrade = liveStandings
+  const liveGrade = !isHistorical && liveStandings
     ? [...(liveStandings['Bad Little Boys'] || []), ...(liveStandings['Mid Little Boys'] || []), ...(liveStandings['Good Little Boys'] || [])]
         .find((t) => t.nick === selected)?.draftGrade
     : null;
@@ -1925,18 +1965,23 @@ function DraftPage({ c, accent }) {
 
   return (
     <div>
-      <SectionHeader title="Draft" c={c} accent={accent} />
+      <div className="flex items-center justify-between mb-3">
+        <SectionHeader title="Draft" c={c} accent={accent} />
+        <select value={year} onChange={(e) => setYear(Number(e.target.value))} className="text-sm rounded-md px-2.5 py-1.5 border font-medium" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
+          {[2026, 2025, 2024, 2023, 2022].map((y) => <option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
         {draftLoading && 'Loading real draft results from Yahoo…'}
-        {!draftLoading && draftError && `Couldn't load live draft data (${draftError}) \u2014 showing sample data instead.`}
-        {!draftLoading && !draftError && 'Real 2026 draft results from Yahoo.'}
+        {!draftLoading && draftError && `Couldn't load real draft data (${draftError}) — showing sample data instead.`}
+        {!draftLoading && !draftError && `Real ${year} draft results from Yahoo.`}
       </div>
 
       <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full text-sm rounded-md px-3 py-2 border font-medium mb-4" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
         {allTeams.map((t) => <option key={t.nick} value={t.nick}>{t.team}</option>)}
       </select>
 
-      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>{team.team}'s Draft Class</div>
+      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>{displayName(selected)}'s Draft Class</div>
       <div className="space-y-1.5 mb-5">
         {picks.map((p) => (
           <Panel key={p.round} c={c} style={{ padding: '8px 12px' }}>
@@ -1951,19 +1996,23 @@ function DraftPage({ c, accent }) {
         ))}
       </div>
 
-      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Draft Analysis</div>
-      <div className="grid grid-cols-2 gap-3">
-        <Panel c={c} style={{ padding: 14 }}>
-          <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>{liveGrade ? 'Yahoo Draft Grade' : 'Pre-Season Grade'}</div>
-          <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade || mockGrades.pre}</div>
-          <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? "Yahoo's own grade for this draft class, based on pick value and roster construction." : 'Reached slightly early on the RB2 spot but landed strong value at WR in the middle rounds.'}</p>
-        </Panel>
-        <Panel c={c} style={{ padding: 14 }}>
-          <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>Post-Season Grade</div>
-          <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade ? '\u2014' : mockGrades.post}</div>
-          <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? 'Updates once the season is underway and real performance data is in.' : 'Updates weekly. Early-round picks are outperforming their draft slot so far this season.'}</p>
-        </Panel>
-      </div>
+      {!isHistorical && (
+        <>
+          <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Draft Analysis</div>
+          <div className="grid grid-cols-2 gap-3">
+            <Panel c={c} style={{ padding: 14 }}>
+              <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>{liveGrade ? 'Yahoo Draft Grade' : 'Pre-Season Grade'}</div>
+              <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade || mockGrades.pre}</div>
+              <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? "Yahoo's own grade for this draft class, based on pick value and roster construction." : 'Reached slightly early on the RB2 spot but landed strong value at WR in the middle rounds.'}</p>
+            </Panel>
+            <Panel c={c} style={{ padding: 14 }}>
+              <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>Post-Season Grade</div>
+              <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade ? '—' : mockGrades.post}</div>
+              <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? 'Updates once the season is underway and real performance data is in.' : 'Updates weekly. Early-round picks are outperforming their draft slot so far this season.'}</p>
+            </Panel>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1987,16 +2036,19 @@ function ChampionYearCard({ ch, c, accent }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((s, i) => (
-            <tr key={s.nick} style={{ borderTop: `1px solid ${c.borderSoft}` }}>
-              <td className="py-1.5" style={{ fontFamily: MONO, color: c.subtextFaint }}>{s.rank}</td>
-              <td className="py-1.5" style={{ color: c.text }}>{displayName(s.nick)}</td>
-              <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.w}-{s.l}</td>
-              <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.divW}-{s.divL}</td>
-              <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: accent }}>{s.pf.toFixed(2)}</td>
-              <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: c.subtextFaint }}>{s.pa.toFixed(2)}</td>
-            </tr>
-          ))}
+          {rows.map((s, i) => {
+            const medal = s.nick === ch.champion ? '\ud83e\udd47' : s.nick === ch.runnerUp ? '\ud83e\udd48' : s.nick === ch.third ? '\ud83e\udd49' : null;
+            return (
+              <tr key={s.nick} style={{ borderTop: `1px solid ${c.borderSoft}` }}>
+                <td className="py-1.5" style={{ fontFamily: MONO, color: c.subtextFaint }}>{i + 1}</td>
+                <td className="py-1.5" style={{ color: c.text }}>{medal && <span className="mr-1">{medal}</span>}{displayName(s.nick)}</td>
+                <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.w}-{s.l}</td>
+                <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.divW}-{s.divL}</td>
+                <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: accent }}>{s.pf.toFixed(2)}</td>
+                <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: c.subtextFaint }}>{s.pa.toFixed(2)}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -2249,8 +2301,17 @@ function MovesPage({ c, accent }) {
   const [typeFilter, setTypeFilter] = useState('all');
   const [yearFilter, setYearFilter] = useState('all');
   const { data: liveMoves, loading, error } = useLiveTransactions();
+  const s2025 = useSeasonDetail(2025);
+  const s2024 = useSeasonDetail(2024);
+  const s2023 = useSeasonDetail(2023);
+  const s2022 = useSeasonDetail(2022);
 
-  const ALL_MOVES = liveMoves ? [...liveMoves, ...MOVES] : MOVES;
+  const historicalLoaded = [s2025, s2024, s2023, s2022].filter((s) => s.moves);
+  const historicalMoves = historicalLoaded.flatMap((s) => s.moves);
+  const loadedYears = new Set(historicalLoaded.flatMap((s) => s.moves.map((m) => m.year)));
+  const mockFallback = MOVES.filter((m) => !loadedYears.has(m.year));
+
+  const ALL_MOVES = [...(liveMoves || []), ...historicalMoves, ...mockFallback];
 
   const allTeamsInvolved = new Set();
   ALL_MOVES.forEach((m) => {
@@ -2272,9 +2333,8 @@ function MovesPage({ c, accent }) {
     <div>
       <SectionHeader title="Moves" c={c} accent={accent} />
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {loading && 'Loading real 2026 transactions from Yahoo…'}
-        {!loading && error && `Couldn't load live 2026 moves (${error}) \u2014 showing sample/historical data only.`}
-        {!loading && !error && '2026 moves are real from Yahoo; earlier years are sample data.'}
+        {loading && 'Loading real transactions from Yahoo…'}
+        {!loading && error && `Couldn't load live 2026 moves (${error}).`} Real data loads per year where available; any year still missing falls back to sample data.
       </div>
       <div className="flex gap-2 mb-4">
         <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)} className="flex-1 text-xs rounded-md px-2 py-2 border" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
