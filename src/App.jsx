@@ -416,6 +416,100 @@ function usePlayoffOdds(liveData, currentWeek, divOrder, restOrder) {
   return { result, loading, error };
 }
 
+// --- Historical season detail (real standings for any past year) ---
+// Known league keys for the renewed chain, plus the separate/unlinked
+// 2022 league (resolved via league_id + season instead, since it has no
+// game_key we already know).
+const HISTORICAL_SEASON_PARAMS = {
+  2025: { league_key: '461.l.45789' },
+  2024: { league_key: '449.l.20860' },
+  2023: { league_key: '423.l.1146108' },
+  2022: { league_id: '1171203', season: '2022' },
+};
+
+// Maps Yahoo's manager nickname (stable across seasons, unlike team_id
+// which can differ especially for the unlinked 2022 league) to our
+// internal nick codes. The two Ryans are disambiguated by team name
+// where possible ("Gojo's Getback" has been Zai's team every season
+// we've verified), falling back to order of appearance otherwise.
+const MANAGER_NICKNAME_TO_NICK = {
+  Nathan: 'NJ', Rbeezy: 'RB', Owen: 'Okarp', Trey: 'Glo pup', ben: 'Bronnie',
+  Brady: 'Bodge', mehrob: 'Rooby', matthew: 'Gill', Brendan: 'Mr', Sean: 'Skeo',
+};
+
+function parseSeasonStandingsGeneric(json) {
+  const teamsObj = json?.fantasy_content?.league?.[1]?.standings?.[0]?.teams;
+  if (!teamsObj) return null;
+
+  const rows = [];
+  let ryanSeen = 0;
+  Object.keys(teamsObj).forEach((key) => {
+    if (key === 'count') return;
+    const teamArr = teamsObj[key].team;
+    const meta = flattenYahooMeta(teamArr[0]);
+    const standings = teamArr[2]?.team_standings || {};
+    const outcomes = standings.outcome_totals || {};
+    const divOutcomes = standings.divisional_outcome_totals || {};
+    const managerNick = meta.managers?.[0]?.manager?.nickname;
+
+    let nick = MANAGER_NICKNAME_TO_NICK[managerNick];
+    if (!nick && managerNick === 'Ryan') {
+      // Zai's team has been "Gojo's Getback" every season we've verified;
+      // otherwise fall back to first-seen = Zai, second-seen = Twizzy.
+      if ((meta.name || '').includes('Gojo')) nick = 'Zai';
+      else { nick = ryanSeen === 0 ? 'Zai' : 'Twizzy'; ryanSeen++; }
+    }
+    if (!nick) return;
+
+    rows.push({
+      nick,
+      team: meta.name,
+      w: Number(outcomes.wins) || 0,
+      l: Number(outcomes.losses) || 0,
+      pf: Number(standings.points_for) || 0,
+      pa: Number(standings.points_against) || 0,
+      divW: Number(divOutcomes.wins) || 0,
+      divL: Number(divOutcomes.losses) || 0,
+      rank: Number(standings.rank) || 99,
+      divisionId: meta.division_id,
+    });
+  });
+  rows.sort((a, b) => a.rank - b.rank);
+  return rows;
+}
+
+function useSeasonDetail(year) {
+  const [rows, setRows] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const params = HISTORICAL_SEASON_PARAMS[year];
+    if (!params) { setLoading(false); return; }
+    setLoading(true);
+    setError(null);
+
+    const qs = params.league_key
+      ? `league_key=${params.league_key}`
+      : `league_id=${params.league_id}&season=${params.season}`;
+
+    fetch(`${API_BASE_URL}/api/season-detail?${qs}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Backend returned an error');
+        return res.json();
+      })
+      .then((json) => {
+        const parsed = parseSeasonStandingsGeneric(json.standings);
+        if (!parsed) throw new Error('Unexpected response shape');
+        setRows(parsed);
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
+  }, [year]);
+
+  return { rows, loading, error };
+}
+
 
 // ============================= THEME =============================
 const THEMES = {
@@ -1017,7 +1111,7 @@ function StandingsPage({ c, accent, divOrder, setDivOrder, restOrder, setRestOrd
   return (
     <div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {loading && 'Loading live standings from Yahoo\u2026'}
+        {loading && 'Loading live standings from Yahoo…'}
         {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
         {!loading && !error && 'Live from Yahoo.'} Seed reflects overall standing across all 12 teams: the 2 best division winners hold seeds 1-2 (byes), everyone else &mdash; including the 3rd division winner &mdash; is seeded 3-12 by record regardless of division. Tiebreakers only apply when W-L records are actually tied.
       </div>
@@ -1071,7 +1165,7 @@ function SchedulePage({ c, accent }) {
       </div>
 
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {loading && 'Loading live matchups from Yahoo\u2026'}
+        {loading && 'Loading live matchups from Yahoo…'}
         {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
         {!loading && !error && 'Live from Yahoo.'}
       </div>
@@ -1313,7 +1407,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
     <div>
       <SectionHeader title="Playoff Picture" c={c} accent={accent} />
       <div className="mb-4 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {loading && 'Loading live standings from Yahoo\u2026'}
+        {loading && 'Loading live standings from Yahoo…'}
         {!loading && error && `Couldn't load live data (${error}) \u2014 showing sample data instead.`}
         {!loading && !error && 'Built live from current Yahoo standings.'} Not official until playoffs actually begin (weeks 15&ndash;17). The bracket reseeds after every round: the highest remaining seed always plays the lowest remaining seed, comparing both winners against each other &mdash; so the #1 seed could face the winner of either Round 1 match, not just the one drawn next to it.
       </div>
@@ -1350,7 +1444,7 @@ function PlayoffsPage({ c, accent, divOrder, restOrder }) {
 
       <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Playoff Odds <span className="normal-case font-normal" style={{ color: c.subtextFaint, opacity: 0.7 }}>(simulated from real record, tiebreakers &amp; remaining schedule)</span></div>
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {oddsLoading && 'Running the simulation against the real remaining schedule\u2026'}
+        {oddsLoading && 'Running the simulation against the real remaining schedule…'}
         {!oddsLoading && oddsResult && 'Recalculated weekly \u2014 based purely on real record, real tiebreakers, and the real remaining schedule. Simulates the rest of the season thousands of times to estimate each team\u2019s odds; pre-season, that means everyone starts as a true coin flip, with variance coming only from schedule structure and tiebreaker mechanics.'}
       </div>
       <div className="space-y-2">
@@ -1830,7 +1924,7 @@ function DraftPage({ c, accent }) {
     <div>
       <SectionHeader title="Draft" c={c} accent={accent} />
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {draftLoading && 'Loading real draft results from Yahoo\u2026'}
+        {draftLoading && 'Loading real draft results from Yahoo…'}
         {!draftLoading && draftError && `Couldn't load live draft data (${draftError}) \u2014 showing sample data instead.`}
         {!draftLoading && !draftError && 'Real 2026 draft results from Yahoo.'}
       </div>
@@ -1873,7 +1967,7 @@ function DraftPage({ c, accent }) {
 
 function ChampionYearCard({ ch, c, accent }) {
   const [open, setOpen] = useState(false);
-  const standings = open ? generateSeasonStandingsByDivision(ch.year) : null;
+  const { rows, loading, error } = useSeasonDetail(ch.year);
 
   const MiniTable = ({ title, rows }) => (
     <div className="mb-3 last:mb-0">
@@ -1892,18 +1986,20 @@ function ChampionYearCard({ ch, c, accent }) {
         <tbody>
           {rows.map((s, i) => (
             <tr key={s.nick} style={{ borderTop: `1px solid ${c.borderSoft}` }}>
-              <td className="py-1.5" style={{ fontFamily: MONO, color: c.subtextFaint }}>{i + 1}</td>
+              <td className="py-1.5" style={{ fontFamily: MONO, color: c.subtextFaint }}>{s.rank}</td>
               <td className="py-1.5" style={{ color: c.text }}>{displayName(s.nick)}</td>
               <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.w}-{s.l}</td>
               <td className="py-1.5 text-center" style={{ fontFamily: MONO, color: c.subtext }}>{s.divW}-{s.divL}</td>
-              <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: accent }}>{s.pf}</td>
-              <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: c.subtextFaint }}>{s.pa}</td>
+              <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: accent }}>{s.pf.toFixed(2)}</td>
+              <td className="py-1.5 text-right" style={{ fontFamily: MONO, color: c.subtextFaint }}>{s.pa.toFixed(2)}</td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
   );
+
+  const divisions = rows ? [...new Set(rows.map((r) => r.divisionId))].sort() : [];
 
   return (
     <Panel c={c} style={{ padding: 12 }}>
@@ -1927,8 +2023,11 @@ function ChampionYearCard({ ch, c, accent }) {
       {open && (
         <div className="mt-3 pt-3 border-t overflow-x-auto" style={{ borderColor: c.borderSoft }}>
           <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: accent }}>Full Regular Season Standings</div>
-          <MiniTable title="Bad Little Boys" rows={standings.bad} />
-          <MiniTable title="Good Little Boys" rows={standings.good} />
+          {loading && <p className="text-xs" style={{ color: c.subtextFaint }}>Loading real standings from Yahoo…</p>}
+          {!loading && error && <p className="text-xs" style={{ color: c.subtextFaint }}>Couldn't load real data ({error}).</p>}
+          {!loading && !error && rows && divisions.map((divId) => (
+            <MiniTable key={divId} title={`Division ${divId}`} rows={rows.filter((r) => r.divisionId === divId)} />
+          ))}
         </div>
       )}
     </Panel>
@@ -2170,7 +2269,7 @@ function MovesPage({ c, accent }) {
     <div>
       <SectionHeader title="Moves" c={c} accent={accent} />
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {loading && 'Loading real 2026 transactions from Yahoo\u2026'}
+        {loading && 'Loading real 2026 transactions from Yahoo…'}
         {!loading && error && `Couldn't load live 2026 moves (${error}) \u2014 showing sample/historical data only.`}
         {!loading && !error && '2026 moves are real from Yahoo; earlier years are sample data.'}
       </div>
