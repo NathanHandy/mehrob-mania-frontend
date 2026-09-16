@@ -452,7 +452,6 @@ function parseSeasonStandingsGeneric(json) {
   if (!teamsObj) return null;
 
   const rows = [];
-  let ryanSeen = 0;
   Object.keys(teamsObj).forEach((key) => {
     if (key === 'count') return;
     const teamArr = teamsObj[key].team;
@@ -465,10 +464,9 @@ function parseSeasonStandingsGeneric(json) {
 
     let nick = MANAGER_NICKNAME_TO_NICK[managerNick];
     if (!nick && managerNick === 'Ryan') {
-      // Zai's team has been "Gojo's Getback" every season we've verified;
-      // otherwise fall back to first-seen = Zai, second-seen = Twizzy.
-      if ((meta.name || '').includes('Gojo')) nick = 'Zai';
-      else { nick = ryanSeen === 0 ? 'Zai' : 'Twizzy'; ryanSeen++; }
+      // Zai's team has been "Gojo's Getback" every season we've verified,
+      // so that's the reliable signal — the other Ryan is always Twizzy.
+      nick = (meta.name || '').includes('Gojo') ? 'Zai' : 'Twizzy';
     }
     // Never drop a real team just because we can't map them to our known
     // 12 — fall back to whatever real identifier Yahoo gives us (a
@@ -543,23 +541,23 @@ function useSeasonDetail(year) {
 
 // --- Every weekly matchup, every season — powers Head-to-Head, Team
 // Points records, Fun facts, and the What-If schedule swap. ---
-function resolveMatchupNick(nickname, teamName, ryanState) {
+function resolveMatchupNick(nickname, teamName) {
   let nick = MANAGER_NICKNAME_TO_NICK[nickname];
   if (!nick && nickname === 'Ryan') {
-    if ((teamName || '').includes('Gojo')) nick = 'Zai';
-    else { nick = ryanState.count === 0 ? 'Zai' : 'Twizzy'; ryanState.count++; }
+    // Zai's team has been "Gojo's Getback" every season we've verified,
+    // so that's the reliable signal — the other Ryan is always Twizzy.
+    nick = (teamName || '').includes('Gojo') ? 'Zai' : 'Twizzy';
   }
   return nick || nickname || teamName || 'Unknown';
 }
 
 function parseAllScores(json) {
   if (!Array.isArray(json)) return null;
-  const ryanState = { count: 0 };
   return json.map((m) => ({
     season: m.season,
     week: m.week,
-    teamA: { nick: resolveMatchupNick(m.teamA.nickname, m.teamA.name, ryanState), points: m.teamA.points },
-    teamB: { nick: resolveMatchupNick(m.teamB.nickname, m.teamB.name, ryanState), points: m.teamB.points },
+    teamA: { nick: resolveMatchupNick(m.teamA.nickname, m.teamA.name), points: m.teamA.points },
+    teamB: { nick: resolveMatchupNick(m.teamB.nickname, m.teamB.name), points: m.teamB.points },
   }));
 }
 
@@ -653,33 +651,47 @@ function computeRealTeamStats(playerWeeks) {
   if (!playerWeeks || !playerWeeks.length) return null;
 
   // Team-week totals per category, summed across every rostered player
-  // that team-week (starters + bench, since "team stats" here means
-  // everything the roster produced that week, not just who started).
+  // that team-week (starters + bench for yardage/TD/FG counting stats,
+  // since "team stats" there means everything the roster produced).
   const teamWeekTotals = {};
   playerWeeks.forEach((pw) => {
     const key = `${pw.teamNickname || pw.teamName}-${pw.season}-${pw.week}`;
     if (!teamWeekTotals[key]) {
-      teamWeekTotals[key] = { nickname: pw.teamNickname, teamName: pw.teamName, season: pw.season, week: pw.week, touchdowns: 0, passingYards: 0, rushingYards: 0, receivingYards: 0, fieldGoals: 0 };
+      teamWeekTotals[key] = { nickname: pw.teamNickname, teamName: pw.teamName, season: pw.season, week: pw.week, touchdowns: 0, passingYards: 0, rushingYards: 0, receivingYards: 0, fieldGoals: 0, offensivePoints: 0, kickingPoints: 0, defensivePoints: 0, benchPoints: 0 };
     }
     Object.entries(pw.stats || {}).forEach(([name, value]) => {
       Object.entries(STAT_MATCHERS).forEach(([cat, regex]) => {
         if (regex.test(name)) teamWeekTotals[key][cat] += value;
       });
     });
+    // Scored fantasy points, split by roster slot — starters only for
+    // offensive/kicking/defensive (that's what actually scored), bench
+    // points tracked separately for the "left on the bench" fun fact.
+    const pts = pw.points || 0;
+    if (pw.position === 'BN') {
+      teamWeekTotals[key].benchPoints += pts;
+    } else if (pw.position === 'K') {
+      teamWeekTotals[key].kickingPoints += pts;
+    } else if (pw.position === 'DEF' || pw.position === 'DST') {
+      teamWeekTotals[key].defensivePoints += pts;
+    } else if (pw.isStarter) {
+      teamWeekTotals[key].offensivePoints += pts;
+    }
   });
 
   const rows = Object.values(teamWeekTotals);
-  const ryanState = { count: 0 };
-  const resolveTeamNick = (r) => resolveMatchupNick(r.nickname, r.teamName, ryanState);
+  const resolveTeamNick = (r) => resolveMatchupNick(r.nickname, r.teamName);
+  const CATS = ['touchdowns', 'passingYards', 'rushingYards', 'receivingYards', 'fieldGoals', 'offensivePoints', 'kickingPoints', 'defensivePoints'];
 
   const seasonTotals = {}; // per nick+season, for "Season, All-Time" per category
   rows.forEach((r) => {
     const nick = resolveTeamNick(r);
     const key = `${nick}-${r.season}`;
-    if (!seasonTotals[key]) seasonTotals[key] = { nick, season: r.season, touchdowns: 0, passingYards: 0, rushingYards: 0, receivingYards: 0, fieldGoals: 0 };
-    ['touchdowns', 'passingYards', 'rushingYards', 'receivingYards', 'fieldGoals'].forEach((cat) => {
-      seasonTotals[key][cat] += r[cat];
-    });
+    if (!seasonTotals[key]) {
+      seasonTotals[key] = { nick, season: r.season };
+      CATS.forEach((c) => { seasonTotals[key][c] = 0; });
+    }
+    CATS.forEach((cat) => { seasonTotals[key][cat] += r[cat]; });
   });
 
   const bestSingleWeek = (cat) => rows.reduce((best, r) => (!best || r[cat] > best[cat] ? r : best), null);
@@ -689,29 +701,79 @@ function computeRealTeamStats(playerWeeks) {
   const seasonLabel = (s) => ({ name: displayName(s.nick), context: String(s.season) });
 
   const tdWeek = bestSingleWeek('touchdowns'), tdSeason = bestSeason('touchdowns');
-  const passWeek = bestSingleWeek('passingYards');
-  const rushWeek = bestSingleWeek('rushingYards');
-  const recSeason = bestSeason('receivingYards');
-  const fgSeason = bestSeason('fieldGoals');
+  const passWeek = bestSingleWeek('passingYards'), passSeason = bestSeason('passingYards');
+  const rushWeek = bestSingleWeek('rushingYards'), rushSeason = bestSeason('rushingYards');
+  const recWeek = bestSingleWeek('receivingYards'), recSeason = bestSeason('receivingYards');
+  const fgWeek = bestSingleWeek('fieldGoals'), fgSeason = bestSeason('fieldGoals');
+  const offWeek = bestSingleWeek('offensivePoints');
+  const kickWeek = bestSingleWeek('kickingPoints');
+  const defWeek = bestSingleWeek('defensivePoints');
+  const benchWeek = bestSingleWeek('benchPoints');
 
-  return [
-    { section: 'Touchdowns — Most', rows: [
-      { label: 'Single Week', value: String(tdWeek.touchdowns), holders: [weekLabel(tdWeek)] },
-      { label: 'Season, All-Time', value: String(tdSeason.touchdowns), holders: [seasonLabel(tdSeason)] },
-    ]},
-    { section: 'Passing Yards — Most', rows: [
-      { label: 'Single Week', value: passWeek.passingYards.toFixed(0), holders: [weekLabel(passWeek)] },
-    ]},
-    { section: 'Rushing Yards — Most', rows: [
-      { label: 'Single Week', value: rushWeek.rushingYards.toFixed(0), holders: [weekLabel(rushWeek)] },
-    ]},
-    { section: 'Receiving Yards — Most', rows: [
-      { label: 'Season, All-Time', value: recSeason.receivingYards.toFixed(0), holders: [seasonLabel(recSeason)] },
-    ]},
-    { section: 'Field Goals — Most', rows: [
-      { label: 'Season, All-Time', value: fgSeason.fieldGoals.toFixed(0), holders: [seasonLabel(fgSeason)] },
-    ]},
-  ];
+  // Longest consecutive weeks a specific player was left on the bench,
+  // within a single season.
+  const benchStreaks = {};
+  playerWeeks.forEach((pw) => {
+    if (pw.position !== 'BN' || !pw.playerKey) return;
+    const nick = resolveMatchupNick(pw.teamNickname, pw.teamName);
+    const key = `${nick}-${pw.season}-${pw.playerKey}`;
+    if (!benchStreaks[key]) benchStreaks[key] = { nick, season: pw.season, playerName: pw.playerName, weeks: [] };
+    benchStreaks[key].weeks.push(pw.week);
+  });
+  let longestBenchStreak = null;
+  Object.values(benchStreaks).forEach((bs) => {
+    const weeks = [...bs.weeks].sort((a, b) => a - b);
+    let cur = 1, max = 1;
+    for (let i = 1; i < weeks.length; i++) {
+      if (weeks[i] === weeks[i - 1] + 1) { cur++; max = Math.max(max, cur); }
+      else cur = 1;
+    }
+    if (!longestBenchStreak || max > longestBenchStreak.streak) {
+      longestBenchStreak = { nick: bs.nick, season: bs.season, playerName: bs.playerName, streak: max };
+    }
+  });
+
+  return {
+    stats: [
+      { section: 'Touchdowns — Most', rows: [
+        { label: 'Single Week', value: String(tdWeek.touchdowns), holders: [weekLabel(tdWeek)] },
+        { label: 'Season, All-Time', value: String(tdSeason.touchdowns), holders: [seasonLabel(tdSeason)] },
+      ]},
+      { section: 'Passing Yards — Most', rows: [
+        { label: 'Single Week', value: passWeek.passingYards.toFixed(0), holders: [weekLabel(passWeek)] },
+        { label: 'Season, All-Time', value: passSeason.passingYards.toFixed(0), holders: [seasonLabel(passSeason)] },
+      ]},
+      { section: 'Rushing Yards — Most', rows: [
+        { label: 'Single Week', value: rushWeek.rushingYards.toFixed(0), holders: [weekLabel(rushWeek)] },
+        { label: 'Season, All-Time', value: rushSeason.rushingYards.toFixed(0), holders: [seasonLabel(rushSeason)] },
+      ]},
+      { section: 'Receiving Yards — Most', rows: [
+        { label: 'Single Week', value: recWeek.receivingYards.toFixed(0), holders: [weekLabel(recWeek)] },
+        { label: 'Season, All-Time', value: recSeason.receivingYards.toFixed(0), holders: [seasonLabel(recSeason)] },
+      ]},
+      { section: 'Field Goals — Most', rows: [
+        { label: 'Single Week', value: fgWeek.fieldGoals.toFixed(0), holders: [weekLabel(fgWeek)] },
+        { label: 'Season, All-Time', value: fgSeason.fieldGoals.toFixed(0), holders: [seasonLabel(fgSeason)] },
+      ]},
+    ],
+    points: [
+      { section: 'Offensive Points — Most', rows: [
+        { label: 'Single Week', value: offWeek.offensivePoints.toFixed(1), holders: [weekLabel(offWeek)] },
+      ]},
+      { section: 'Kicking Points — Most', rows: [
+        { label: 'Single Week', value: kickWeek.kickingPoints.toFixed(1), holders: [weekLabel(kickWeek)] },
+      ]},
+      { section: 'Defensive Points — Most', rows: [
+        { label: 'Single Week', value: defWeek.defensivePoints.toFixed(1), holders: [weekLabel(defWeek)] },
+      ]},
+    ],
+    fun: [
+      { section: 'Bad Decisions', rows: [
+        { label: 'Most Points Left on Bench, Single Week', value: benchWeek.benchPoints.toFixed(1), holders: [weekLabel(benchWeek)] },
+        ...(longestBenchStreak ? [{ label: 'Longest Bench Player Left In', value: `${longestBenchStreak.streak} wks`, holders: [{ name: `${longestBenchStreak.playerName} (${displayName(longestBenchStreak.nick)})`, context: String(longestBenchStreak.season) }] }] : []),
+      ]},
+    ],
+  };
 }
 
 // ============================= THEME =============================
@@ -1034,10 +1096,10 @@ function NavDrawer({ open, onClose, onNavigate, c, accent, page }) {
 
 // ============================= HOME =============================
 const SEASON_TIMERS = [
-  { id: 'draft', label: 'Draft', target: new Date('2026-07-25T09:45:00-04:00'), sub: 'July 25 \u00b7 9:45 AM ET' },
-  { id: 'trade', label: 'Trade Deadline', target: new Date('2026-12-05T23:59:00-05:00'), sub: 'December 5 \u00b7 11:59 PM ET' },
-  { id: 'playoffs', label: 'Playoffs Start', target: new Date('2026-12-10T20:15:00-05:00'), sub: 'December 10 \u00b7 8:15 PM ET' },
-  { id: 'champion', label: 'Champion Crowned', target: new Date('2027-01-04T23:59:00-05:00'), sub: 'January 4 \u00b7 11:59 PM ET' },
+  { id: 'draft', label: 'Draft', target: new Date('2026-07-25T09:45:00-04:00'), sub: 'July 25 · 9:45 AM ET' },
+  { id: 'trade', label: 'Trade Deadline', target: new Date('2026-12-05T23:59:00-05:00'), sub: 'December 5 · 11:59 PM ET' },
+  { id: 'playoffs', label: 'Playoffs Start', target: new Date('2026-12-18T20:15:00-05:00'), sub: 'Week 15 begins Dec 16 · first games Dec 18' },
+  { id: 'champion', label: 'Champion Crowned', target: new Date('2027-01-04T23:59:00-05:00'), sub: 'January 4 · 11:59 PM ET' },
 ];
 
 function TimerCard({ timer, c, accent }) {
@@ -1128,11 +1190,41 @@ const NEWS_STORIES = [
 
 const NEWS_TAGS = ['All', 'Commissioner', 'Preview', 'Recap', 'Power Rankings'];
 
+// Real weekly recaps built from actual scores — factual, not fabricated:
+// highest/lowest score, closest game, biggest blowout, every real week.
+function computeRealRecapStories(allScores, season) {
+  const seasonGames = allScores.filter((m) => m.season === season);
+  if (!seasonGames.length) return [];
+  const weeks = [...new Set(seasonGames.map((m) => m.week))].sort((a, b) => a - b);
+
+  return weeks.map((week) => {
+    const games = seasonGames.filter((m) => m.week === week);
+    const scored = games.flatMap((m) => [{ nick: m.teamA.nick, points: m.teamA.points }, { nick: m.teamB.nick, points: m.teamB.points }]);
+    const high = scored.reduce((a, b) => (b.points > a.points ? b : a));
+    const low = scored.reduce((a, b) => (b.points < a.points ? b : a));
+    const margins = games.map((m) => ({ a: m.teamA, b: m.teamB, margin: Math.abs(m.teamA.points - m.teamB.points) }));
+    const closest = margins.reduce((a, b) => (b.margin < a.margin ? b : a));
+    const blowout = margins.reduce((a, b) => (b.margin > a.margin ? b : a));
+
+    const title = `Week ${week} Recap: ${displayName(high.nick)} Puts Up the Week's Best Score`;
+    const sub = `${displayName(high.nick)} led all scorers at ${high.points.toFixed(1)}; the closest game came down to the wire.`;
+    const body = `${displayName(high.nick)} posted the week's highest total at ${high.points.toFixed(1)} points, while ${displayName(low.nick)} brought up the rear at ${low.points.toFixed(1)}.\n\n`
+      + `The closest game of the week came down to ${displayName(closest.a.nick)} (${closest.a.points.toFixed(1)}) vs. ${displayName(closest.b.nick)} (${closest.b.points.toFixed(1)}), decided by just ${closest.margin.toFixed(1)} points. `
+      + `On the other end, ${displayName(blowout.a.nick)} (${blowout.a.points.toFixed(1)}) and ${displayName(blowout.b.nick)} (${blowout.b.points.toFixed(1)}) weren't nearly as competitive, settled by a ${blowout.margin.toFixed(1)}-point margin.`;
+
+    return { tag: 'Recap', title, sub, date: `Week ${week}, ${season}`, body };
+  }).reverse();
+}
+
 function NewsroomPage({ c, accent }) {
   const [filter, setFilter] = useState('All');
   const [openStory, setOpenStory] = useState(null);
+  const { data: allScores, loading: scoresLoading } = useAllScores();
+  const realRecaps = allScores ? computeRealRecapStories(allScores, 2026) : [];
+  const nonRecapSample = NEWS_STORIES.filter((s) => s.tag !== 'Recap');
+  const allStories = [...realRecaps, ...nonRecapSample];
 
-  const filtered = filter === 'All' ? NEWS_STORIES : NEWS_STORIES.filter((s) => s.tag === filter);
+  const filtered = filter === 'All' ? allStories : allStories.filter((s) => s.tag === filter);
 
   if (openStory) {
     return (
@@ -1151,6 +1243,10 @@ function NewsroomPage({ c, accent }) {
   return (
     <div>
       <SectionHeader title="Newsroom" c={c} accent={accent} />
+      <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
+        {scoresLoading && 'Loading real weekly recaps from Yahoo…'}
+        {!scoresLoading && 'Recap stories are generated from real weekly scores. Commissioner/Preview/Power Rankings stories are still flavor content.'}
+      </div>
       <div className="flex gap-1.5 mb-4 overflow-x-auto pb-1">
         {NEWS_TAGS.map((t) => (
           <button key={t} onClick={() => setFilter(t)} className="text-xs font-semibold px-3 py-1.5 rounded-full whitespace-nowrap border"
@@ -1698,9 +1794,10 @@ const TEAM_BIOS = {
   Bodge: { desc: 'Strong football knowledge and a chill personality when sober. Longtime player and a big sports gambler. Loves George Pickens and other hype-beast type players.', location: 'Boston, MA', accomplishments: 'Won the league during his freshman year of college; hosts the league’s in-person offline drafts', blunders: 'Whether hosting the draft is actually a good idea remains a running debate' },
 };
 
-function TeamsPage({ c, accent }) {
+function TeamsPage({ c, accent, initialNick }) {
   const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
   const [selected, setSelected] = useState(allTeams[0].nick);
+  useEffect(() => { if (initialNick) setSelected(initialNick); }, [initialNick]);
   const team = allTeams.find((t) => t.nick === selected);
   const bio = TEAM_BIOS[selected];
   const [expanded, setExpanded] = useState(false);
@@ -2142,10 +2239,13 @@ function draftGrades(nick) {
   };
 }
 
-function DraftPage({ c, accent }) {
+function DraftPage({ c, accent, initialNick, initialYear }) {
   const allTeams = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
   const [selected, setSelected] = useState(allTeams[0].nick);
+  const [selected2, setSelected2] = useState(allTeams[1].nick);
+  const [compareMode, setCompareMode] = useState(false);
   const [year, setYear] = useState(2026);
+  useEffect(() => { if (initialNick) { setSelected(initialNick); setCompareMode(false); if (initialYear) setYear(initialYear); } }, [initialNick, initialYear]);
   const team = allTeams.find((t) => t.nick === selected);
   const isHistorical = year !== 2026;
 
@@ -2159,6 +2259,8 @@ function DraftPage({ c, accent }) {
 
   const livePicks = activeDraft ? activeDraft[selected] : null;
   const picks = livePicks || generateDraftClass(selected);
+  const livePicks2 = activeDraft ? activeDraft[selected2] : null;
+  const picks2 = livePicks2 || generateDraftClass(selected2);
 
   const liveGrade = !isHistorical && liveStandings
     ? [...(liveStandings['Bad Little Boys'] || []), ...(liveStandings['Mid Little Boys'] || []), ...(liveStandings['Good Little Boys'] || [])]
@@ -2180,39 +2282,94 @@ function DraftPage({ c, accent }) {
         {!draftLoading && !draftError && `Real ${year} draft results from Yahoo.`}
       </div>
 
-      <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full text-sm rounded-md px-3 py-2 border font-medium mb-4" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
-        {allTeams.map((t) => <option key={t.nick} value={t.nick}>{t.team}</option>)}
-      </select>
-
-      <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>{displayName(selected)}'s Draft Class</div>
-      <div className="space-y-1.5 mb-5">
-        {picks.map((p) => (
-          <Panel key={p.round} c={c} style={{ padding: '8px 12px' }}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <span className="text-[10px] w-9 text-center flex-shrink-0" style={{ fontFamily: MONO, color: c.subtextFaint }}>R{p.round}</span>
-                <span className="text-sm font-medium" style={{ color: c.text }}>{p.player}</span>
-              </div>
-              {p.position && <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" style={{ color: c.subtextFaint, backgroundColor: c.panelAlt }}>{p.position}</span>}
-            </div>
-          </Panel>
-        ))}
+      <div className="flex gap-1 mb-3 rounded-lg border p-1" style={{ borderColor: c.border, backgroundColor: c.panel }}>
+        <button onClick={() => setCompareMode(false)} className="flex-1 text-xs font-semibold py-2 rounded-md"
+          style={{ backgroundColor: !compareMode ? c.panelAlt : 'transparent', color: !compareMode ? c.text : c.subtextFaint }}>
+          Single Team
+        </button>
+        <button onClick={() => setCompareMode(true)} className="flex-1 text-xs font-semibold py-2 rounded-md"
+          style={{ backgroundColor: compareMode ? c.panelAlt : 'transparent', color: compareMode ? c.text : c.subtextFaint }}>
+          Compare Two Teams
+        </button>
       </div>
 
-      {!isHistorical && (
+      {!compareMode ? (
         <>
-          <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Draft Analysis</div>
-          <div className="grid grid-cols-2 gap-3">
-            <Panel c={c} style={{ padding: 14 }}>
-              <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>{liveGrade ? 'Yahoo Draft Grade' : 'Pre-Season Grade'}</div>
-              <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade || mockGrades.pre}</div>
-              <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? "Yahoo's own grade for this draft class, based on pick value and roster construction." : 'Reached slightly early on the RB2 spot but landed strong value at WR in the middle rounds.'}</p>
-            </Panel>
-            <Panel c={c} style={{ padding: 14 }}>
-              <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>Post-Season Grade</div>
-              <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade ? '—' : mockGrades.post}</div>
-              <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? 'Updates once the season is underway and real performance data is in.' : 'Updates weekly. Early-round picks are outperforming their draft slot so far this season.'}</p>
-            </Panel>
+          <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full text-sm rounded-md px-3 py-2 border font-medium mb-4" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
+            {allTeams.map((t) => <option key={t.nick} value={t.nick}>{t.team}</option>)}
+          </select>
+
+          <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>{displayName(selected)}'s Draft Class</div>
+          <div className="space-y-1.5 mb-5">
+            {picks.map((p) => (
+              <Panel key={p.round} c={c} style={{ padding: '8px 12px' }}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-[10px] w-9 text-center flex-shrink-0" style={{ fontFamily: MONO, color: c.subtextFaint }}>R{p.round}</span>
+                    <span className="text-sm font-medium" style={{ color: c.text }}>{p.player}</span>
+                  </div>
+                  {p.position && <span className="text-[10px] uppercase font-semibold px-1.5 py-0.5 rounded" style={{ color: c.subtextFaint, backgroundColor: c.panelAlt }}>{p.position}</span>}
+                </div>
+              </Panel>
+            ))}
+          </div>
+
+          {!isHistorical && (
+            <>
+              <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Draft Analysis</div>
+              <div className="grid grid-cols-2 gap-3">
+                <Panel c={c} style={{ padding: 14 }}>
+                  <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>{liveGrade ? 'Yahoo Draft Grade' : 'Pre-Season Grade'}</div>
+                  <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade || mockGrades.pre}</div>
+                  <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? "Yahoo's own grade for this draft class, based on pick value and roster construction." : 'Reached slightly early on the RB2 spot but landed strong value at WR in the middle rounds.'}</p>
+                </Panel>
+                <Panel c={c} style={{ padding: 14 }}>
+                  <div className="text-[9px] uppercase tracking-wider mb-1" style={{ color: c.subtextFaint }}>Post-Season Grade</div>
+                  <div className="text-3xl font-bold mb-2" style={{ fontFamily: MONO, color: accent }}>{liveGrade ? '—' : mockGrades.post}</div>
+                  <p className="text-xs" style={{ color: c.subtext }}>{liveGrade ? 'Updates once the season is underway and real performance data is in.' : 'Updates weekly. Early-round picks are outperforming their draft slot so far this season.'}</p>
+                </Panel>
+              </div>
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full text-xs rounded-md px-2 py-2 border font-medium" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
+              {allTeams.map((t) => <option key={t.nick} value={t.nick}>{t.team}</option>)}
+            </select>
+            <select value={selected2} onChange={(e) => setSelected2(e.target.value)} className="w-full text-xs rounded-md px-2 py-2 border font-medium" style={{ backgroundColor: c.panelAlt, color: c.text, borderColor: c.border }}>
+              {allTeams.map((t) => <option key={t.nick} value={t.nick}>{t.team}</option>)}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-2 mb-2">
+            <div className="text-[10px] uppercase tracking-wider text-center" style={{ color: c.subtextFaint }}>{displayName(selected)}</div>
+            <div className="text-[10px] uppercase tracking-wider text-center" style={{ color: c.subtextFaint }}>{displayName(selected2)}</div>
+          </div>
+          <div className="space-y-1.5">
+            {Array.from({ length: Math.max(picks.length, picks2.length) }).map((_, i) => {
+              const p1 = picks[i], p2 = picks2[i];
+              return (
+                <div key={i} className="grid grid-cols-2 gap-2">
+                  <Panel c={c} style={{ padding: '8px 10px' }}>
+                    {p1 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] w-7 text-center flex-shrink-0" style={{ fontFamily: MONO, color: c.subtextFaint }}>R{p1.round}</span>
+                        <span className="text-xs font-medium truncate" style={{ color: c.text }}>{p1.player}</span>
+                      </div>
+                    )}
+                  </Panel>
+                  <Panel c={c} style={{ padding: '8px 10px' }}>
+                    {p2 && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] w-7 text-center flex-shrink-0" style={{ fontFamily: MONO, color: c.subtextFaint }}>R{p2.round}</span>
+                        <span className="text-xs font-medium truncate" style={{ color: c.text }}>{p2.player}</span>
+                      </div>
+                    )}
+                  </Panel>
+                </div>
+              );
+            })}
           </div>
         </>
       )}
@@ -2293,6 +2450,59 @@ function ChampionYearCard({ ch, c, accent }) {
 }
 
 // ============================= RECORD BOOK =============================
+// Fun facts that need standings across MULTIPLE completed seasons at once
+// (playoff droughts, last-place streaks, worst record to still make it).
+function computeDroughtFacts(seasonRowsList) {
+  const valid = seasonRowsList.filter((s) => s.rows && s.rows.length);
+  if (!valid.length) return null;
+  valid.sort((a, b) => a.season - b.season);
+
+  const byNick = {};
+  valid.forEach((s) => {
+    const totalTeams = s.rows.length;
+    s.rows.forEach((r) => {
+      if (!byNick[r.nick]) byNick[r.nick] = [];
+      const seed = r.playoffSeed || r.finalRank;
+      byNick[r.nick].push({
+        season: s.season,
+        madePlayoffs: seed != null && seed <= 6,
+        isLastPlace: (r.playoffSeed || r.finalRank) === totalTeams,
+        w: r.w, l: r.l, playoffSeed: r.playoffSeed,
+      });
+    });
+  });
+
+  let worstDrought = { nick: null, count: 0 };
+  let worstLastPlaceStreak = { nick: null, count: 0 };
+  let worstPlayoffRecord = null;
+
+  Object.keys(byNick).forEach((nick) => {
+    const seasons = byNick[nick].sort((a, b) => a.season - b.season);
+    let drought = 0;
+    for (let i = seasons.length - 1; i >= 0; i--) {
+      if (!seasons[i].madePlayoffs) drought++;
+      else break;
+    }
+    if (drought > worstDrought.count) worstDrought = { nick, count: drought };
+
+    let lpStreak = 0;
+    for (let i = seasons.length - 1; i >= 0; i--) {
+      if (seasons[i].isLastPlace) lpStreak++;
+      else break;
+    }
+    if (lpStreak > worstLastPlaceStreak.count) worstLastPlaceStreak = { nick, count: lpStreak };
+
+    seasons.filter((s) => s.madePlayoffs).forEach((s) => {
+      const winPct = s.w / ((s.w + s.l) || 1);
+      if (!worstPlayoffRecord || winPct < worstPlayoffRecord.winPct) {
+        worstPlayoffRecord = { nick, winPct, w: s.w, l: s.l, season: s.season };
+      }
+    });
+  });
+
+  return { worstDrought, worstLastPlaceStreak, worstPlayoffRecord };
+}
+
 function computeRealRecordBook(allScores) {
   if (!allScores || !allScores.length) return null;
 
@@ -2392,6 +2602,27 @@ function computeRealRecordBook(allScores) {
     if (champCounts[nick].second > mostRunnerUps.count) mostRunnerUps = { nick, count: champCounts[nick].second };
   });
 
+  // Strength of schedule: average points the OPPONENT scored against you,
+  // per season, as a proxy for how tough the schedule was that year.
+  const sosBySeasonNick = {};
+  allScores.forEach((m) => {
+    const addSos = (nick, oppPoints, season) => {
+      const key = `${nick}-${season}`;
+      if (!sosBySeasonNick[key]) sosBySeasonNick[key] = { nick, season, total: 0, games: 0 };
+      sosBySeasonNick[key].total += oppPoints;
+      sosBySeasonNick[key].games += 1;
+    };
+    addSos(m.teamA.nick, m.teamB.points, m.season);
+    addSos(m.teamB.nick, m.teamA.points, m.season);
+  });
+  let hardestSos = null, easiestSos = null;
+  Object.values(sosBySeasonNick).forEach((s) => {
+    if (s.games < 5) return; // skip partial/in-progress seasons
+    const avg = s.total / s.games;
+    if (!hardestSos || avg > hardestSos.avg) hardestSos = { ...s, avg };
+    if (!easiestSos || avg < easiestSos.avg) easiestSos = { ...s, avg };
+  });
+
   const holder = (nick, context) => [{ name: displayName(nick), context }];
 
   return {
@@ -2411,6 +2642,10 @@ function computeRealRecordBook(allScores) {
       ]},
       { section: 'Margin of Victory — Smallest', rows: [
         { label: 'Single Week', value: closeMargin.value.toFixed(1), holders: [{ name: closeMargin.label, context: closeMargin.context }] },
+      ]},
+      { section: 'Strength of Schedule', rows: [
+        ...(hardestSos ? [{ label: 'Hardest, Weekly Avg', value: hardestSos.avg.toFixed(1), holders: holder(hardestSos.nick, hardestSos.season) }] : []),
+        ...(easiestSos ? [{ label: 'Easiest, Weekly Avg', value: easiestSos.avg.toFixed(1), holders: holder(easiestSos.nick, easiestSos.season) }] : []),
       ]},
     ],
     points: [
@@ -2438,6 +2673,15 @@ function RecordBookPage({ c, accent }) {
   const [tab, setTab] = useState('champions');
   const { data: allScores, loading: scoresLoading } = useAllScores();
   const playerStats = usePlayerStats();
+  const s2025 = useSeasonDetail(2025);
+  const s2024 = useSeasonDetail(2024);
+  const s2023 = useSeasonDetail(2023);
+  const s2022 = useSeasonDetail(2022);
+  const droughtFacts = computeDroughtFacts([
+    { season: 2025, rows: s2025.rows }, { season: 2024, rows: s2024.rows },
+    { season: 2023, rows: s2023.rows }, { season: 2022, rows: s2022.rows },
+  ]);
+
   const realRecords = allScores ? computeRealRecordBook(allScores) : null;
   const realTeamStats = playerStats.data ? computeRealTeamStats(playerStats.data) : null;
   const mergedBook = { ...RECORD_BOOK };
@@ -2449,8 +2693,29 @@ function RecordBookPage({ c, accent }) {
     });
   }
   if (realTeamStats) {
-    const realTitles = new Set(realTeamStats.map((s) => s.section));
-    mergedBook.stats = [...realTeamStats, ...RECORD_BOOK.stats.filter((s) => !realTitles.has(s.section))];
+    ['stats', 'points', 'fun'].forEach((cat) => {
+      const realSections = realTeamStats[cat];
+      const realTitles = new Set(realSections.map((s) => s.section));
+      mergedBook[cat] = [...realSections, ...mergedBook[cat].filter((s) => !realTitles.has(s.section))];
+    });
+  }
+  if (droughtFacts) {
+    const streaksSection = {
+      section: 'Streaks & Droughts',
+      rows: [
+        ...(droughtFacts.worstDrought.count > 0 ? [{ label: 'Longest Active Playoff Drought', value: `${droughtFacts.worstDrought.count} season${droughtFacts.worstDrought.count === 1 ? '' : 's'}`, holders: [{ name: displayName(droughtFacts.worstDrought.nick) }] }] : []),
+        ...(droughtFacts.worstLastPlaceStreak.count > 0 ? [{ label: 'Most Consecutive Last-Place Finishes', value: String(droughtFacts.worstLastPlaceStreak.count), holders: [{ name: displayName(droughtFacts.worstLastPlaceStreak.nick) }] }] : []),
+      ],
+    };
+    mergedBook.fun = [streaksSection, ...mergedBook.fun.filter((s) => s.section !== 'Streaks & Droughts')];
+
+    if (droughtFacts.worstPlayoffRecord) {
+      const wr = droughtFacts.worstPlayoffRecord;
+      mergedBook.fun = mergedBook.fun.map((s) => {
+        if (s.section !== 'Extremes') return s;
+        return { ...s, rows: [...s.rows.filter((r) => r.label !== 'Worst Record to Still Make Playoffs'), { label: 'Worst Record to Still Make Playoffs', value: `${wr.w}-${wr.l}`, holders: [{ name: displayName(wr.nick), context: String(wr.season) }] }] };
+      });
+    }
   }
 
   const tabs = [
@@ -2487,7 +2752,7 @@ function RecordBookPage({ c, accent }) {
               {playerStats.status === 'idle' && (
                 <>
                   <p className="text-xs mb-3" style={{ color: c.subtext }}>
-                    This pulls every rostered player's stat line, every week, every season — roughly 2,000+ Yahoo API calls. It runs in the background and takes several minutes.
+                    This pulls every rostered player's stat line and scored points, every week, every season — roughly 2,000+ Yahoo API calls. It also powers Offensive/Kicking/Defensive Points (Team Points tab) and Bad Decisions (Fun tab). Runs in the background and takes several minutes.
                   </p>
                   <button onClick={playerStats.start} className="w-full text-sm font-semibold py-2.5 rounded-md" style={{ backgroundColor: accent, color: '#0A0D0A' }}>
                     Start Loading Team Stats
@@ -2538,10 +2803,73 @@ const POWER_CHART_COLORS = [
   '#F472B6', '#2DD4BF', '#A3E635', '#F87171', '#818CF8', '#FACC15',
 ];
 
-function PowerRankingsPage({ c, accent }) {
-  const chartTeams = POWER_RANKINGS.map((r) => r.nick);
+// Real weekly power rankings: cumulative win% (PF as tiebreak) at each
+// week checkpoint of the season, with factual (not fabricated) blurbs
+// built from each team's actual record, recent form, and scoring rank.
+function computeRealPowerRankings(allScores, season) {
+  const seasonGames = allScores.filter((m) => m.season === season).sort((a, b) => a.week - b.week);
+  if (!seasonGames.length) return null;
+  const weeks = [...new Set(seasonGames.map((m) => m.week))].sort((a, b) => a - b);
 
-  const withDelta = POWER_RANKINGS.map((r) => ({ ...r, delta: r.lastRank - r.rank }));
+  const allNicks = new Set();
+  seasonGames.forEach((m) => { allNicks.add(m.teamA.nick); allNicks.add(m.teamB.nick); });
+  const cum = {};
+  const gameLog = {};
+  allNicks.forEach((n) => { cum[n] = { w: 0, l: 0, pf: 0 }; gameLog[n] = []; });
+
+  const history = [];
+  const rankSnapshots = {};
+
+  weeks.forEach((week) => {
+    seasonGames.filter((m) => m.week === week).forEach((m) => {
+      const aWin = m.teamA.points > m.teamB.points;
+      cum[m.teamA.nick].pf += m.teamA.points;
+      cum[m.teamB.nick].pf += m.teamB.points;
+      if (aWin) { cum[m.teamA.nick].w++; cum[m.teamB.nick].l++; gameLog[m.teamA.nick].push('W'); gameLog[m.teamB.nick].push('L'); }
+      else { cum[m.teamB.nick].w++; cum[m.teamA.nick].l++; gameLog[m.teamB.nick].push('W'); gameLog[m.teamA.nick].push('L'); }
+    });
+    const ranked = [...allNicks].sort((a, b) => {
+      const wpA = cum[a].w / ((cum[a].w + cum[a].l) || 1), wpB = cum[b].w / ((cum[b].w + cum[b].l) || 1);
+      if (wpB !== wpA) return wpB - wpA;
+      return cum[b].pf - cum[a].pf;
+    });
+    const snapshot = {};
+    ranked.forEach((n, i) => { snapshot[n] = i + 1; });
+    rankSnapshots[week] = snapshot;
+    const row = { week: `W${week}` };
+    ranked.forEach((n) => { row[n] = snapshot[n]; });
+    history.push(row);
+  });
+
+  const latestWeek = weeks[weeks.length - 1];
+  const prevWeek = weeks.length > 1 ? weeks[weeks.length - 2] : null;
+  const latestSnapshot = rankSnapshots[latestWeek];
+  const prevSnapshot = prevWeek ? rankSnapshots[prevWeek] : latestSnapshot;
+  const pfRankOrder = [...allNicks].sort((a, b) => cum[b].pf - cum[a].pf);
+
+  const rankings = [...allNicks].map((nick) => {
+    const rank = latestSnapshot[nick];
+    const lastRank = prevSnapshot[nick] || rank;
+    const record = cum[nick];
+    const winPct = ((record.w / ((record.w + record.l) || 1)) * 100).toFixed(0);
+    const recent = gameLog[nick].slice(-3);
+    const recentRecord = `${recent.filter((r) => r === 'W').length}-${recent.filter((r) => r === 'L').length}`;
+    const pfRank = pfRankOrder.indexOf(nick) + 1;
+    const blurb = `${record.w}-${record.l} (${winPct}% win rate), ${recentRecord} over the last ${recent.length} game${recent.length === 1 ? '' : 's'}. Ranks #${pfRank} of ${allNicks.size} in total points scored.`;
+    return { nick, rank, lastRank, blurb };
+  }).sort((a, b) => a.rank - b.rank);
+
+  return { history, rankings };
+}
+
+function PowerRankingsPage({ c, accent }) {
+  const { data: allScores, loading: scoresLoading } = useAllScores();
+  const real = allScores ? computeRealPowerRankings(allScores, 2026) : null;
+  const rankingsSource = real ? real.rankings : POWER_RANKINGS;
+  const historySource = real ? real.history : POWER_RANK_HISTORY;
+  const chartTeams = rankingsSource.map((r) => r.nick);
+
+  const withDelta = rankingsSource.map((r) => ({ ...r, delta: r.lastRank - r.rank }));
   const riser = [...withDelta].sort((a, b) => b.delta - a.delta)[0];
   const faller = [...withDelta].sort((a, b) => a.delta - b.delta)[0];
 
@@ -2549,7 +2877,9 @@ function PowerRankingsPage({ c, accent }) {
     <div>
       <SectionHeader title="Power Rankings" c={c} accent={accent} />
       <div className="mb-4 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        Blends actual results (record, scoring trends, schedule) with an AI "eye test" read on team strength &mdash; weighted more toward the numbers. Sample rankings shown.
+        {scoresLoading && 'Loading real weekly scores from Yahoo…'}
+        {!scoresLoading && real && 'Real cumulative win% (points for as tiebreak) at each week of the season — not a subjective \u201ceye test,\u201d just the actual numbers.'}
+        {!scoresLoading && !real && 'Sample rankings shown — no real 2026 games yet.'}
       </div>
 
       <div className="grid grid-cols-2 gap-2 mb-4">
@@ -2569,7 +2899,7 @@ function PowerRankingsPage({ c, accent }) {
         <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Rank Over Time &mdash; All 12 Teams</div>
         <div style={{ width: '100%', height: 280 }}>
           <ResponsiveContainer>
-            <LineChart data={POWER_RANK_HISTORY} margin={{ top: 4, right: 8, left: -8, bottom: 0 }}>
+            <LineChart data={historySource} margin={{ top: 4, right: 8, left: -8, bottom: 0 }}>
               <XAxis dataKey="week" tick={{ fontSize: 10, fill: c.subtextFaint }} axisLine={{ stroke: c.border }} tickLine={false} />
               <YAxis reversed domain={[1, 12]} tick={{ fontSize: 10, fill: c.subtextFaint }} axisLine={{ stroke: c.border }} tickLine={false} />
               <Tooltip contentStyle={{ backgroundColor: c.panel, border: `1px solid ${c.border}`, fontSize: 12, color: c.text }} />
@@ -2607,14 +2937,11 @@ function PowerRankingsPage({ c, accent }) {
       <Panel c={c} style={{ padding: 16 }}>
         <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>Methodology</div>
         <p className="text-xs mb-2" style={{ color: c.subtext }}>
-          Rankings are recalculated every week using a blend of factors, weighted more heavily toward statistics than opinion &mdash; similar to how major pro sports power rankings work:
+          Recalculated after every real week from actual results — no subjective "eye test," just the numbers:
         </p>
         <ul className="text-xs space-y-1.5" style={{ color: c.subtext }}>
-          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Record &amp; recent form</span> &mdash; wins/losses, weighted toward the last 3 weeks</li>
-          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Scoring efficiency</span> &mdash; points for/against relative to league average</li>
-          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Strength of schedule</span> &mdash; quality of opponents faced so far</li>
-          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Roster health</span> &mdash; injuries and bye-week impact</li>
-          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Eye test</span> &mdash; a smaller, subjective adjustment for how a team is actually performing beyond the raw numbers</li>
+          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Win percentage</span> &mdash; cumulative record through that week, real games only</li>
+          <li>&bull; <span style={{ color: c.text, fontWeight: 600 }}>Points for</span> &mdash; used as the tiebreaker whenever win% is tied</li>
         </ul>
       </Panel>
     </div>
@@ -2752,7 +3079,7 @@ const CONSTITUTION_SECTIONS = [
       { h: '1.2.3 Trade Restrictions', body: ['No limit on the number of trades per team per year. Draft pick trades are limited to draft day only.'] },
       { h: '1.3 Waiver Wire', body: ['After the draft, all un-rostered players become free agents. The waiver wire begins the Sunday prior to Week 1.'] },
       { h: '1.3.1 Free Agent Auction Budget (FAAB)', body: ['Each owner gets **$100 FAAB** after the draft. FAAB can be traded but not borrowed from future seasons, and balances cannot go negative. Ties are broken in favor of the team lower in the standings.'] },
-      { h: '1.4 Divisional Breakdown', body: ['Two divisions have existed since the league’s founding. Each season, the league winner may elect two managers to swap divisions.'] },
+      { h: '1.4 Divisional Breakdown', body: ['Three divisions: Bad Little Boys, Mid Little Boys, and Good Little Boys. Each season, the league winner may elect two managers to swap divisions.'] },
     ],
   },
   {
@@ -2795,28 +3122,28 @@ const CONSTITUTION_SECTIONS = [
         '**Offensive Fumble Return TD:** 6 points',
       ] },
       { h: 'Kickers', body: [
-        '**Field Goals:** scored by total distance — 10 yards = 1 point',
-        '**Missed FG, 0–19 yds:** –1 points',
-        '**Missed FG, 20–29 yds:** –1 points',
-        '**PAT Made:** 1 point',
-        '**PAT Missed:** –1 points',
+        '**Field Goals:** scored by total distance — 20 yards = 1 point',
+        '**Missed FG, 0–19 yds:** –0.5 points',
+        '**Missed FG, 20–29 yds:** –0.5 points',
+        '**PAT Made:** 0.5 points',
+        '**PAT Missed:** –0.5 points',
       ] },
       { h: 'Defense / Special Teams', body: [
-        '**Points Allowed, 0:** 10 points',
-        '**Points Allowed, 1–6:** 7 points',
-        '**Points Allowed, 7–13:** 4 points',
-        '**Points Allowed, 14–20:** 1 point',
+        '**Points Allowed, 0:** 5 points',
+        '**Points Allowed, 1–6:** 3.5 points',
+        '**Points Allowed, 7–13:** 2 points',
+        '**Points Allowed, 14–20:** 0.5 points',
         '**Points Allowed, 21–27:** 0 points',
-        '**Points Allowed, 28–34:** –1 points',
-        '**Points Allowed, 35+:** –4 points',
-        '**Sack:** 1 point',
-        '**Interception:** 2 points',
-        '**Fumble Recovery:** 2 points',
-        '**Touchdown:** 6 points',
-        '**Safety:** 2 points',
-        '**Block Kick:** 2 points',
-        '**Kickoff/Punt Return TD:** 6 points',
-        '**Extra Point Returned:** 2 points',
+        '**Points Allowed, 28–34:** –0.5 points',
+        '**Points Allowed, 35+:** –2 points',
+        '**Sack:** 0.5 points',
+        '**Interception:** 1 point',
+        '**Fumble Recovery:** 1 point',
+        '**Touchdown:** 3 points',
+        '**Safety:** 1 point',
+        '**Block Kick:** 1 point',
+        '**Kickoff/Punt Return TD:** 3 points',
+        '**Extra Point Returned:** 1 point',
       ] },
     ],
   },
@@ -2895,18 +3222,58 @@ export default function App() {
   const [page, setPage] = useState('home');
   const [menuOpen, setMenuOpen] = useState(false);
   const [search, setSearch] = useState('');
+  const [searchNavNick, setSearchNavNick] = useState(null);
+  const [searchNavYear, setSearchNavYear] = useState(null);
   const [divOrder, setDivOrder] = useState(['divRecord', 'pf', 'h2h']);
   const [restOrder, setRestOrder] = useState(['pf', 'divRecord', 'h2h']);
   const c = THEMES[themeName];
   const accent = themeName === 'dark' ? '#FFB800' : '#B8860B';
+
+  const { data: liveDraftForSearch } = useLiveDraft();
+  const { data: allScoresForSearch } = useAllScores();
+  const hist2025 = useSeasonDetail(2025);
+  const hist2024 = useSeasonDetail(2024);
+  const hist2023 = useSeasonDetail(2023);
+  const hist2022 = useSeasonDetail(2022);
+  const allTeamsForSearch = [...BAD_LITTLE_BOYS, ...MID_LITTLE_BOYS, ...GOOD_LITTLE_BOYS];
+
+  const searchQuery = search.trim().toLowerCase();
+
+  const teamMatches = searchQuery.length >= 2
+    ? allTeamsForSearch.filter((t) => displayName(t.nick).toLowerCase().includes(searchQuery) || t.team.toLowerCase().includes(searchQuery) || (t.owner || '').toLowerCase().includes(searchQuery)).slice(0, 5)
+    : [];
+
+  const draftSources = [
+    { year: 2026, byNick: liveDraftForSearch },
+    { year: 2025, byNick: hist2025.draftByNick },
+    { year: 2024, byNick: hist2024.draftByNick },
+    { year: 2023, byNick: hist2023.draftByNick },
+    { year: 2022, byNick: hist2022.draftByNick },
+  ];
+  const playerMatches = searchQuery.length >= 2
+    ? draftSources.flatMap(({ year, byNick }) => {
+        if (!byNick) return [];
+        return Object.entries(byNick).flatMap(([nick, picks]) => picks.filter((p) => p.player.toLowerCase().includes(searchQuery)).map((p) => ({ ...p, nick, year })));
+      }).slice(0, 5)
+    : [];
+
+  const matchupMatches = searchQuery.length >= 2 && allScoresForSearch
+    ? allScoresForSearch.filter((m) => displayName(m.teamA.nick).toLowerCase().includes(searchQuery) || displayName(m.teamB.nick).toLowerCase().includes(searchQuery))
+        .sort((a, b) => b.season - a.season || b.week - a.week).slice(0, 5)
+    : [];
+
+  const showResults = searchQuery.length >= 2 && (teamMatches.length > 0 || playerMatches.length > 0 || matchupMatches.length > 0);
+
+  const goToTeam = (nick) => { setSearchNavNick(nick); setPage('teams'); setSearch(''); setMenuOpen(false); };
+  const goToDraft = (nick, year) => { setSearchNavNick(nick); setSearchNavYear(year); setPage('draft'); setSearch(''); setMenuOpen(false); };
 
   const PAGES = {
     home: <HomePage c={c} accent={accent} onNavigate={setPage} />,
     standings: <StandingsPage c={c} accent={accent} divOrder={divOrder} setDivOrder={setDivOrder} restOrder={restOrder} setRestOrder={setRestOrder} />,
     schedule: <SchedulePage c={c} accent={accent} />,
     playoffs: <PlayoffsPage c={c} accent={accent} divOrder={divOrder} restOrder={restOrder} />,
-    teams: <TeamsPage c={c} accent={accent} />,
-    draft: <DraftPage c={c} accent={accent} />,
+    teams: <TeamsPage c={c} accent={accent} initialNick={page === 'teams' ? searchNavNick : null} />,
+    draft: <DraftPage c={c} accent={accent} initialNick={page === 'draft' ? searchNavNick : null} initialYear={page === 'draft' ? searchNavYear : null} />,
     records: <RecordBookPage c={c} accent={accent} />,
     trophyroom: <TrophyRoomPage c={c} accent={accent} />,
     power: <PowerRankingsPage c={c} accent={accent} />,
@@ -2939,9 +3306,33 @@ export default function App() {
             Mehrob<span style={{ color: accent }}>Mania</span>
           </h1>
           <p className="text-xs mt-1.5" style={{ color: c.subtext }}>Bad, Mid &amp; Good Little Boys &middot; 12 Managers &middot; Est. 2022</p>
-          <div className="mt-3 flex items-center gap-2 rounded-lg border px-3 py-2" style={{ backgroundColor: c.panelAlt, borderColor: c.border }}>
-            <Search size={13} style={{ color: c.subtext }} />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search teams, players, matchups..." className="bg-transparent outline-none text-sm w-full" style={{ color: c.text }} />
+          <div className="relative">
+            <div className="mt-3 flex items-center gap-2 rounded-lg border px-3 py-2" style={{ backgroundColor: c.panelAlt, borderColor: c.border }}>
+              <Search size={13} style={{ color: c.subtext }} />
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search teams, players, matchups..." className="bg-transparent outline-none text-sm w-full" style={{ color: c.text }} />
+            </div>
+            {showResults && (
+              <div className="absolute left-0 right-0 mt-1 rounded-lg border overflow-hidden z-20 max-h-80 overflow-y-auto" style={{ backgroundColor: c.panel, borderColor: c.border }}>
+                {teamMatches.map((t) => (
+                  <button key={t.nick} onClick={() => goToTeam(t.nick)} className="w-full text-left px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${c.borderSoft}` }}>
+                    <span className="text-sm" style={{ color: c.text }}>{displayName(t.nick)}</span>
+                    <span className="text-[10px]" style={{ color: c.subtextFaint }}>Team</span>
+                  </button>
+                ))}
+                {playerMatches.map((p, i) => (
+                  <button key={`p${i}`} onClick={() => goToDraft(p.nick, p.year)} className="w-full text-left px-3 py-2 flex items-center justify-between" style={{ borderBottom: `1px solid ${c.borderSoft}` }}>
+                    <span className="text-sm" style={{ color: c.text }}>{p.player}</span>
+                    <span className="text-[10px]" style={{ color: c.subtextFaint }}>{displayName(p.nick)}, {p.year} draft</span>
+                  </button>
+                ))}
+                {matchupMatches.map((m, i) => (
+                  <div key={`m${i}`} className="w-full text-left px-3 py-2 flex items-center justify-between" style={{ borderBottom: i < matchupMatches.length - 1 ? `1px solid ${c.borderSoft}` : 'none' }}>
+                    <span className="text-sm" style={{ color: c.text }}>{displayName(m.teamA.nick)} {m.teamA.points.toFixed(1)} &ndash; {m.teamB.points.toFixed(1)} {displayName(m.teamB.nick)}</span>
+                    <span className="text-[10px]" style={{ color: c.subtextFaint }}>Wk {m.week}, {m.season}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
