@@ -5,6 +5,7 @@ import {
   FileText, Swords, Filter, Zap, Shield,
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts';
+import { HISTORICAL_DATA } from './historicalData';
 
 // ============================= LIVE DATA CONFIG =============================
 const API_BASE_URL = 'https://mehrob-mania-backend-1.onrender.com';
@@ -426,17 +427,6 @@ function usePlayoffOdds(liveData, currentWeek, divOrder, restOrder) {
   return { result, loading, error };
 }
 
-// --- Historical season detail (real standings for any past year) ---
-// Known league keys for the renewed chain, plus the separate/unlinked
-// 2022 league (resolved via league_id + season instead, since it has no
-// game_key we already know).
-const HISTORICAL_SEASON_PARAMS = {
-  2025: { league_key: '461.l.45789' },
-  2024: { league_key: '449.l.20860' },
-  2023: { league_key: '423.l.1146108' },
-  2022: { league_id: '1171203', season: '2022' },
-};
-
 // Maps Yahoo's manager nickname (stable across seasons, unlike team_id
 // which can differ especially for the unlinked 2022 league) to our
 // internal nick codes. The two Ryans are disambiguated by team name
@@ -504,39 +494,12 @@ function parseSeasonStandingsGeneric(json) {
 }
 
 function useSeasonDetail(year) {
-  const [rows, setRows] = useState(null);
-  const [draftByNick, setDraftByNick] = useState(null);
-  const [moves, setMoves] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    const params = HISTORICAL_SEASON_PARAMS[year];
-    if (!params) { setLoading(false); return; }
-    setLoading(true);
-    setError(null);
-
-    const qs = params.league_key
-      ? `league_key=${params.league_key}`
-      : `league_id=${params.league_id}&season=${params.season}`;
-
-    fetch(`${API_BASE_URL}/api/season-detail?${qs}`)
-      .then((res) => {
-        if (!res.ok) throw new Error('Backend returned an error');
-        return res.json();
-      })
-      .then((json) => {
-        const parsed = parseSeasonStandingsGeneric(json.standings);
-        if (!parsed) throw new Error('Unexpected response shape');
-        setRows(parsed);
-        if (json.draft) setDraftByNick(parseYahooDraft(json.draft));
-        if (json.transactions) setMoves(parseYahooTransactions(json.transactions, Number(year)));
-      })
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [year]);
-
-  return { rows, draftByNick, moves, loading, error };
+  // Historical years are frozen static data now — no fetch needed at all.
+  const seasonData = year ? HISTORICAL_DATA.seasons[year] : null;
+  const rows = seasonData ? seasonData.rows : null;
+  const draftByNick = seasonData ? seasonData.draftByNick : null;
+  const moves = year ? HISTORICAL_DATA.moves.filter((m) => m.year === Number(year)) : null;
+  return { rows, draftByNick, moves, loading: false, error: null };
 }
 
 // --- Every weekly matchup, every season — powers Head-to-Head, Team
@@ -578,7 +541,7 @@ function computeH2H(allScores, nickA, nickB) {
 
 
 function useAllScores() {
-  const [data, setData] = useState(null);
+  const [liveData, setLiveData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -591,12 +554,15 @@ function useAllScores() {
       .then((json) => {
         const parsed = parseAllScores(json);
         if (!parsed) throw new Error('Unexpected response shape');
-        setData(parsed);
+        setLiveData(parsed);
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, []);
 
+  // Historical seasons are frozen static data; only the current season
+  // needs the live fetch above.
+  const data = liveData ? [...HISTORICAL_DATA.allScores, ...liveData] : null;
   return { data, loading, error };
 }
 
@@ -606,6 +572,7 @@ function usePlayerStats() {
   const [status, setStatus] = useState('idle');
   const [progress, setProgress] = useState(0);
   const [total, setTotal] = useState(0);
+  const [skipped, setSkipped] = useState(0);
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [started, setStarted] = useState(false);
@@ -619,6 +586,7 @@ function usePlayerStats() {
         .then((json) => {
           if (cancelled) return;
           setStatus(json.status);
+          setSkipped(json.skipped || 0);
           if (json.status === 'computing') {
             setProgress(json.progress || 0);
             setTotal(json.total || 0);
@@ -636,7 +604,8 @@ function usePlayerStats() {
   }, [started]);
 
   const start = () => setStarted(true);
-  return { status, progress, total, data, error, start };
+  const combinedData = data ? [...HISTORICAL_DATA.playerStats, ...data] : null;
+  return { status, progress, total, skipped, data: combinedData, error, start };
 }
 
 const STAT_MATCHERS = {
@@ -1872,7 +1841,7 @@ function TeamsPage({ c, accent, initialNick }) {
 
           <div>
             <div className="text-[10px] uppercase tracking-wider mb-2" style={{ color: c.subtextFaint }}>All-Time Record vs. Everyone</div>
-            {scoresLoading && <p className="text-xs mb-2" style={{ color: c.subtextFaint }}>Loading real head-to-head records from Yahoo… (this one takes a bit longer)</p>}
+            {scoresLoading && <p className="text-xs mb-2" style={{ color: c.subtextFaint }}>Loading real head-to-head records from Yahoo…</p>}
             <Panel c={c} style={{ overflow: 'hidden' }}>
               {otherTeams.map((t, i) => {
                 const h2h = computeH2H(allScores, selected, t.nick);
@@ -2041,7 +2010,7 @@ function WhatIfSimulatorPage({ c, accent }) {
     <div>
       <SectionHeader title="What If Simulator" c={c} accent={accent} />
       <div className="mb-4 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {mode === 'schedule' && scoresLoading && 'Loading real weekly scores from Yahoo… (this one takes a bit longer)'}
+        {mode === 'schedule' && scoresLoading && 'Loading real weekly scores from Yahoo…'}
         {mode === 'schedule' && !scoresLoading && scoresError && `Couldn't load real scores (${scoresError}).`}
         {mode === 'schedule' && !scoresLoading && !scoresError && 'Runs off real weekly scores from Yahoo — regular season only (weeks 1–14).'}
         {mode === 'median' && "Sample logic shown — real median-format simulation coming later."}
@@ -2729,7 +2698,7 @@ function RecordBookPage({ c, accent }) {
     <div>
       <SectionHeader title="Record Book" c={c} accent={accent} />
       <div className="mb-3 text-xs rounded-md px-3 py-2 border" style={{ color: c.subtext, backgroundColor: c.panelAlt, borderColor: c.border }}>
-        {scoresLoading && 'Loading real records from Yahoo… (this one takes a bit longer)'}
+        {scoresLoading && 'Loading real records from Yahoo…'}
         {!scoresLoading && 'Head-to-Head, Team Points, and Fun records are real, computed from every real weekly score. Team Stats (TDs, yards, FGs) needs a much bigger pull — see that tab to start it.'}
       </div>
       <div className="flex gap-1 mb-4 rounded-lg border p-1 overflow-x-auto" style={{ borderColor: c.border, backgroundColor: c.panel }}>
@@ -2752,7 +2721,7 @@ function RecordBookPage({ c, accent }) {
               {playerStats.status === 'idle' && (
                 <>
                   <p className="text-xs mb-3" style={{ color: c.subtext }}>
-                    This pulls every rostered player's stat line and scored points, every week, every season — roughly 2,000+ Yahoo API calls. It also powers Offensive/Kicking/Defensive Points (Team Points tab) and Bad Decisions (Fun tab). Runs in the background and takes several minutes.
+                    Pulls every rostered player's stat line for the current season only (historical years are already baked in). Also powers Offensive/Kicking/Defensive Points (Team Points tab) and Bad Decisions (Fun tab). Runs in the background, usually just a minute or two now.
                   </p>
                   <button onClick={playerStats.start} className="w-full text-sm font-semibold py-2.5 rounded-md" style={{ backgroundColor: accent, color: '#0A0D0A' }}>
                     Start Loading Team Stats
@@ -2763,6 +2732,7 @@ function RecordBookPage({ c, accent }) {
                 <>
                   <p className="text-xs mb-2" style={{ color: c.subtext }}>Computing… this can take several minutes. Feel free to check back later — it keeps running in the background.</p>
                   <div className="text-xs" style={{ fontFamily: MONO, color: accent }}>{playerStats.progress} / {playerStats.total || '?'} team-weeks processed</div>
+                  {playerStats.skipped > 0 && <div className="text-xs mt-1" style={{ fontFamily: MONO, color: c.loss }}>{playerStats.skipped} team-weeks failed even after retries</div>}
                 </>
               )}
               {playerStats.status === 'error' && (
